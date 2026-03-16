@@ -71,6 +71,13 @@ export class StreamHandler {
       this.sendStatusMessage('restart');
     });
 
+    // Quando a sessão expira por timeout
+    this.session.on('timeout', () => {
+      this.thread.send('⏰ **Sessão encerrada por inatividade.**').catch((err) =>
+        console.error('[StreamHandler] Erro ao enviar mensagem de timeout:', err.message)
+      );
+    });
+
     // Garante que erros emitidos pela sessão sejam tratados (Node exige ao menos um listener)
     this.session.on('error', (err) => {
       console.error('[StreamHandler] ❌ Erro na sessão:', err.message);

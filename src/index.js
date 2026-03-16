@@ -14,6 +14,8 @@ import { SessionManager } from './session-manager.js';
 import { ServerManager } from './server-manager.js';
 import { handleCommand, handleInteraction, handleAutocomplete, commandDefinitions } from './commands.js';
 import { formatAge, debug } from './utils.js';
+import { ALLOWED_USERS, ALLOW_SHARED_SESSIONS } from './config.js';
+import { startHealthServer } from './health.js';
 
 // ─── Validação de configuração ────────────────────────────────────────────────
 
@@ -29,9 +31,6 @@ if (missing.length > 0) {
 
 const serverManager = new ServerManager();
 const sessionManager = new SessionManager(serverManager);
-
-const ALLOWED_USERS = (process.env.ALLOWED_USER_IDS || '')
-  .split(',').map((s) => s.trim()).filter(Boolean);
 
 const client = new Client({
   intents: [
@@ -69,6 +68,7 @@ client.once('clientReady', async (c) => {
   console.log(`📁 Projetos: ${process.env.PROJECTS_BASE_PATH}`);
   console.log(`🔧 OpenCode: ${process.env.OPENCODE_BIN || 'opencode'}\n`);
   await registerCommands();
+  startHealthServer({ sessionManager, serverManager, startedAt: Date.now() });
 });
 
 // Slash commands, autocomplete e interações de componentes
@@ -90,7 +90,9 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         await interaction.reply(reply);
       }
-    } catch {}
+    } catch (replyErr) {
+      console.error('[interactionCreate] Erro ao enviar resposta de erro:', replyErr.message);
+    }
   }
 });
 
@@ -116,6 +118,12 @@ client.on('messageCreate', async (message) => {
   // Verifica se existe uma sessão associada a essa thread
   const session = sessionManager.getByThread(message.channel.id);
   if (!session) return;
+
+  // Verifica ownership da sessão (a menos que sessões compartilhadas estejam habilitadas)
+  if (!ALLOW_SHARED_SESSIONS && session.userId !== message.author.id) {
+    debug('Bot', '🚫 Usuário %s tentou interagir com sessão de %s', message.author.id, session.userId);
+    return;
+  }
 
   // Não aceita input enquanto está processando (exceto comandos especiais)
   const text = message.content.trim();
@@ -151,15 +159,33 @@ client.on('messageCreate', async (message) => {
   // Reação visual de "recebido"
   try {
     await message.react('⚙️');
-  } catch {}
+  } catch (reactErr) {
+    debug('Bot', '⚠️ Erro ao reagir à mensagem: %s', reactErr.message);
+  }
 });
 
 // ─── Graceful shutdown ─────────────────────────────────────────────────────────
 
 async function shutdown(signal) {
   console.log(`\n${signal} recebido. Encerrando sessões...`);
-  const sessions = sessionManager.getAll();
-  await Promise.allSettled(sessions.map((s) => s.close()));
+  const sessions = sessionManager.getAll().filter((s) => s.status !== 'finished' && s.status !== 'error');
+
+  // Notifica usuários nas threads ativas
+  await Promise.allSettled(
+    sessions.map(async (s) => {
+      try {
+        const channel = await client.channels.fetch(s.threadId);
+        if (channel) await channel.send('⚠️ **Bot reiniciando.** Sua sessão será encerrada.');
+      } catch {
+        // thread pode já estar arquivada
+      }
+    })
+  );
+
+  // Encerra sessões com timeout de segurança
+  const closePromise = Promise.allSettled(sessions.map((s) => s.close()));
+  await Promise.race([closePromise, new Promise((r) => setTimeout(r, 10_000))]);
+
   await serverManager.stopAll();
   client.destroy();
   process.exit(0);
