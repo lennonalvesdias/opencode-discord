@@ -38,7 +38,6 @@ export class StreamHandler {
   start() {
     // Ouve output da sessão
     this.session.on('output', (chunk) => {
-      debug('StreamHandler', `🔔 output event (${chunk.length} chars) | hasOutput=${this.hasOutput} | buffered=${this.currentContent.length} chars`);
       this.hasOutput = true;
       this.currentContent += chunk;
       this.scheduleUpdate();
@@ -104,7 +103,6 @@ export class StreamHandler {
    * Agenda um update de mensagem (debounced para evitar rate limit)
    */
   scheduleUpdate() {
-    debug('StreamHandler', `⏱️  scheduleUpdate | timer ativo=${!!this.updateTimer}`);
     if (this.updateTimer) return;
     this.updateTimer = setTimeout(async () => {
       this.updateTimer = null;
@@ -121,46 +119,39 @@ export class StreamHandler {
     const content = this.currentContent;
     this.currentContent = '';
 
-    // Divide em chunks respeitando o limite Discord (descontando overhead do code block)
-    const chunks = splitIntoChunks(content, MSG_LIMIT - 8);
+    // Divide em chunks respeitando o limite Discord
+    const chunks = splitIntoChunks(content, MSG_LIMIT);
     debug('StreamHandler', `🚿 flush iniciado | conteúdo=${content.length} chars | chunks a enviar=${chunks.length}`);
 
     for (const chunk of chunks) {
       if (!chunk.trim()) continue;
-
-      const formatted = formatAsCodeBlock(chunk);
 
       try {
         // Se a mensagem atual ainda tem espaço, edita ela
         if (
           this.currentMessage &&
           this.session.status === 'running' &&
-          this.currentMessageLength + formatted.length < MSG_LIMIT
+          this.currentMessageLength + chunk.length < MSG_LIMIT
         ) {
           const newContent = mergeContent(this.currentRawContent, chunk);
-          const newFormatted = formatAsCodeBlock(newContent);
 
-          if (newFormatted.length <= 1990) {  // limite rígido com margem de segurança
-            debug('StreamHandler', `✏️  editando mensagem existente (${newFormatted.length} chars)`);
-            await this.currentMessage.edit(newFormatted);
+          if (newContent.length <= MSG_LIMIT) {
+            debug('StreamHandler', `✏️  editando mensagem existente (${newContent.length} chars)`);
+            await this.currentMessage.edit(newContent);
             this.currentRawContent = newContent;
-            this.currentMessageLength = newFormatted.length;
+            this.currentMessageLength = newContent.length;
             continue;
           }
         }
 
         // Caso contrário, cria nova mensagem
-        debug('StreamHandler', `📨 criando nova mensagem (${formatted.length} chars)`);
-        this.currentMessage = await this.thread.send(formatted);
+        debug('StreamHandler', `📨 criando nova mensagem (${chunk.length} chars)`);
+        this.currentMessage = await this.thread.send(chunk);
         this.currentRawContent = chunk;
-        this.currentMessageLength = formatted.length;
+        this.currentMessageLength = chunk.length;
       } catch (err) {
         debug('StreamHandler', `❌ erro ao enviar: ${err.message}`);
         console.error('[StreamHandler] Erro ao enviar mensagem:', err.message);
-        // Fallback: tenta enviar como texto simples
-        try {
-          await this.thread.send(truncate(chunk, 1990));
-        } catch {}
       }
     }
   }
@@ -217,18 +208,6 @@ export class StreamHandler {
 // ─── Utilitários de formatação ────────────────────────────────────────────────
 
 /**
- * Envolve conteúdo em bloco de código para melhor legibilidade no Discord
- * @param {string} content
- * @returns {string}
- */
-function formatAsCodeBlock(content) {
-  const trimmed = content.trim();
-  if (!trimmed) return '';
-  // Overhead do bloco de código: ``` + \n + ... + \n + ``` = 8 chars
-  return `\`\`\`\n${trimmed}\n\`\`\``;
-}
-
-/**
  * Divide texto longo em pedaços respeitando o limite do Discord
  * @param {string} text
  * @param {number} limit
@@ -264,14 +243,4 @@ function splitIntoChunks(text, limit) {
 function mergeContent(existing, newChunk) {
   if (!existing) return newChunk;
   return existing + '\n' + newChunk;
-}
-
-/**
- * Trunca string ao tamanho máximo com reticências
- * @param {string} str
- * @param {number} max
- * @returns {string}
- */
-function truncate(str, max) {
-  return str.length > max ? str.slice(0, max - 3) + '...' : str;
 }

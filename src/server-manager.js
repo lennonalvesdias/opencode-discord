@@ -13,8 +13,20 @@ import { debug } from './utils.js';
 const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode';
 const OPENCODE_BASE_PORT = parseInt(process.env.OPENCODE_BASE_PORT || '4100', 10);
 
-/** Tipos SSE que nunca carregam sessionId — suprimir do log de diagnóstico */
-const IGNORED_TYPES = new Set(['server.heartbeat', 'server.connected']);
+/**
+ * Tipos SSE que nunca carregam sessionID em properties.sessionID
+ * ou que nunca são tratados por handleSSEEvent — suprimir do log de diagnóstico
+ */
+const IGNORED_TYPES = new Set([
+  'session.created',
+  'session.updated',
+  'session.diff',
+  'message.updated',
+  'message.part.updated',
+  'file.watcher.updated',
+  'server.heartbeat',
+  'server.connected',
+]);
 
 // ─── OpenCodeServer ───────────────────────────────────────────────────────────
 
@@ -86,8 +98,6 @@ class OpenCodeServer extends EventEmitter {
       lineBuffer = lines.pop(); // guarda linha incompleta
 
       for (const line of lines) {
-        debug('OpenCodeServer', '📋 stdout: %s', line.trim());
-
         if (this.status !== 'ready' && line.includes('listening on http://')) {
           this.status = 'ready';
           console.log('[OpenCodeServer] 🟢 Servidor pronto — porta %d', this.port);
@@ -99,7 +109,6 @@ class OpenCodeServer extends EventEmitter {
     });
 
     child.stderr.on('data', (chunk) => {
-      debug('OpenCodeServer', '⚠️  stderr: %s', chunk.trim());
     });
 
     // ── Tratamento de encerramento / reinicialização ───────────────────────────
@@ -190,12 +199,8 @@ class OpenCodeServer extends EventEmitter {
       return;
     }
 
-    debug(
-      'OpenCodeServer',
-      'Evento SSE sem sessão registrada: %s %s',
-      actualType,
-      sessionId
-    );
+    // Sub-sessões internas do opencode (ex: tool calls) não são registradas — ignorar silenciosamente
+    return;
   }
 
   /**
