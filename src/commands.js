@@ -8,15 +8,20 @@ import {
   StringSelectMenuBuilder,
   ButtonBuilder,
   ButtonStyle,
+  MessageFlags,
 } from 'discord.js';
 import { readdirSync, existsSync } from 'fs';
 import path from 'path';
+import { StreamHandler } from './stream-handler.js';
+import { formatAge } from './utils.js';
 
 const PROJECTS_BASE = process.env.PROJECTS_BASE_PATH || 'C:\\projetos';
 const ALLOWED_USERS = (process.env.ALLOWED_USER_IDS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+const STATUS_EMOJI = { running: '⚙️', waiting_input: '💬', finished: '✅', error: '❌', idle: '💤' };
 
 // ─── Definições dos comandos ──────────────────────────────────────────────────
 
@@ -25,7 +30,10 @@ export const commandDefinitions = [
     .setName('plan')
     .setDescription('Inicia uma sessão de planejamento (agent plan) em um projeto')
     .addStringOption((o) =>
-      o.setName('projeto').setDescription('Nome da pasta do projeto').setRequired(false)
+      o.setName('projeto')
+       .setDescription('Nome da pasta do projeto')
+       .setRequired(false)
+       .setAutocomplete(true)
     )
     .addStringOption((o) =>
       o.setName('prompt').setDescription('Descrição inicial da tarefa').setRequired(false)
@@ -35,7 +43,10 @@ export const commandDefinitions = [
     .setName('build')
     .setDescription('Inicia uma sessão de desenvolvimento (agent build) em um projeto')
     .addStringOption((o) =>
-      o.setName('projeto').setDescription('Nome da pasta do projeto').setRequired(false)
+      o.setName('projeto')
+       .setDescription('Nome da pasta do projeto')
+       .setRequired(false)
+       .setAutocomplete(true)
     )
     .addStringOption((o) =>
       o.setName('prompt').setDescription('Descrição do que deve ser desenvolvido').setRequired(false)
@@ -60,12 +71,17 @@ export const commandDefinitions = [
 
 // ─── Handler de comandos ──────────────────────────────────────────────────────
 
+/**
+ * Processa um slash command recebido
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
 export async function handleCommand(interaction, sessionManager) {
   // Verificação de acesso
   if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(interaction.user.id)) {
     return interaction.reply({
       content: '🚫 Você não tem permissão para usar este bot.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -84,8 +100,28 @@ export async function handleCommand(interaction, sessionManager) {
   }
 }
 
+/**
+ * Responde a autocomplete de projeto para /plan e /build
+ * @param {import('discord.js').AutocompleteInteraction} interaction
+ */
+export async function handleAutocomplete(interaction) {
+  const focused = interaction.options.getFocused().toLowerCase();
+  const projects = getProjects();
+  const filtered = projects
+    .filter((p) => p.toLowerCase().includes(focused))
+    .slice(0, 25)
+    .map((p) => ({ name: p, value: p }));
+  await interaction.respond(filtered);
+}
+
 // ─── Handlers individuais ─────────────────────────────────────────────────────
 
+/**
+ * Inicia uma nova sessão OpenCode em uma thread Discord
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ * @param {'plan'|'build'} mode
+ */
 async function handleStartSession(interaction, sessionManager, mode) {
   await interaction.deferReply();
 
@@ -121,10 +157,22 @@ async function handleStartSession(interaction, sessionManager, mode) {
     });
   }
 
-  // Valida o caminho do projeto
-  const projectPath = path.join(PROJECTS_BASE, projectName);
+  // Valida e sanitiza o caminho do projeto (prevenção de path traversal)
+  const resolvedBase = path.resolve(PROJECTS_BASE);
+  const projectPath = path.resolve(PROJECTS_BASE, projectName);
+  if (!projectPath.startsWith(resolvedBase + path.sep) && projectPath !== resolvedBase) {
+    return interaction.editReply('❌ Caminho de projeto inválido.');
+  }
   if (!existsSync(projectPath)) {
     return interaction.editReply(`❌ Projeto \`${projectName}\` não encontrado em \`${PROJECTS_BASE}\`.`);
+  }
+
+  // Verifica se já existe sessão ativa para este projeto
+  const existing = sessionManager.getByProject(projectPath);
+  if (existing) {
+    return interaction.editReply(
+      `⚠️ Já existe uma sessão ativa para \`${projectName}\` nesta thread: <#${existing.threadId}>. Encerre-a primeiro com \`/parar\`.`
+    );
   }
 
   // Cria thread para a sessão
@@ -136,25 +184,22 @@ async function handleStartSession(interaction, sessionManager, mode) {
   });
 
   // Cria e inicia a sessão
-  const session = sessionManager.create({
+  const session = await sessionManager.create({
     projectPath,
     threadId: thread.id,
     userId: interaction.user.id,
+    agent: mode,
   });
 
-  const { StreamHandler } = await import('./stream-handler.js');
   const streamHandler = new StreamHandler(thread, session);
   streamHandler.start();
-  session.start();
 
   // Mensagem inicial na thread
   await thread.send(buildSessionEmbed({ mode, projectName, projectPath, session }));
 
-  // Se passou um prompt inicial, envia para o processo
+  // Se passou um prompt inicial, envia diretamente
   if (promptText) {
-    setTimeout(() => {
-      session.sendInput(promptText);
-    }, 1500); // aguarda o opencode inicializar
+    await session.sendMessage(promptText);
   }
 
   await interaction.editReply(
@@ -162,17 +207,20 @@ async function handleStartSession(interaction, sessionManager, mode) {
   );
 }
 
+/**
+ * Lista todas as sessões ativas
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
 async function handleListSessions(interaction, sessionManager) {
   const sessions = sessionManager.getAll();
 
   if (sessions.length === 0) {
-    return interaction.reply({ content: '📭 Nenhuma sessão ativa no momento.', ephemeral: true });
+    return interaction.reply({ content: '📭 Nenhuma sessão ativa no momento.', flags: MessageFlags.Ephemeral });
   }
 
-  const statusEmoji = { running: '⚙️', waiting_input: '💬', finished: '✅', error: '❌', idle: '💤' };
-
   const lines = sessions.map((s) => {
-    const emoji = statusEmoji[s.status] || '❓';
+    const emoji = STATUS_EMOJI[s.status] || '❓';
     const age = formatAge(s.createdAt);
     return `${emoji} \`${s.sessionId.slice(-6)}\` · **${path.basename(s.projectPath)}** · ${s.status} · ${age}`;
   });
@@ -184,24 +232,28 @@ async function handleListSessions(interaction, sessionManager) {
     .setFooter({ text: `${sessions.length} sessão(ões) ativa(s)` })
     .setTimestamp();
 
-  interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
+/**
+ * Exibe o status da sessão associada à thread atual
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
 async function handleStatus(interaction, sessionManager) {
   const session = sessionManager.getByThread(interaction.channelId);
 
   if (!session) {
     return interaction.reply({
       content: '❌ Nenhuma sessão OpenCode associada a esta thread.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
   const s = session.toSummary();
-  const statusEmoji = { running: '⚙️', waiting_input: '💬', finished: '✅', error: '❌', idle: '💤' };
 
   const embed = new EmbedBuilder()
-    .setTitle(`${statusEmoji[s.status] || '❓'} Status da Sessão`)
+    .setTitle(`${STATUS_EMOJI[s.status] || '❓'} Status da Sessão`)
     .addFields(
       { name: 'Projeto', value: s.project, inline: true },
       { name: 'Status', value: s.status, inline: true },
@@ -213,16 +265,21 @@ async function handleStatus(interaction, sessionManager) {
     .setColor(s.status === 'error' ? 0xff0000 : s.status === 'finished' ? 0x00ff00 : 0x5865f2)
     .setTimestamp();
 
-  interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
+/**
+ * Encerra a sessão na thread atual (com confirmação)
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
 async function handleStop(interaction, sessionManager) {
   const session = sessionManager.getByThread(interaction.channelId);
 
   if (!session) {
     return interaction.reply({
       content: '❌ Nenhuma sessão ativa nesta thread.',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -238,20 +295,24 @@ async function handleStop(interaction, sessionManager) {
       .setStyle(ButtonStyle.Secondary)
   );
 
-  interaction.reply({
+  await interaction.reply({
     content: `⚠️ Deseja encerrar a sessão para **${path.basename(session.projectPath)}**?`,
     components: [row],
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }
 
+/**
+ * Lista os projetos disponíveis no diretório base
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ */
 async function handleListProjects(interaction) {
   const projects = getProjects();
 
   if (projects.length === 0) {
     return interaction.reply({
       content: `📭 Nenhum projeto encontrado em \`${PROJECTS_BASE}\`.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -261,11 +322,16 @@ async function handleListProjects(interaction) {
     .setColor(0x57f287)
     .setFooter({ text: `Base: ${PROJECTS_BASE}` });
 
-  interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
 // ─── Handler de interações (select menus, botões) ─────────────────────────────
 
+/**
+ * Processa interações de select menu e botões
+ * @param {import('discord.js').StringSelectMenuInteraction | import('discord.js').ButtonInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
 export async function handleInteraction(interaction, sessionManager) {
   if (!interaction.isStringSelectMenu() && !interaction.isButton()) return;
 
@@ -273,26 +339,47 @@ export async function handleInteraction(interaction, sessionManager) {
   if (interaction.customId.startsWith('select_project_')) {
     const mode = interaction.customId.replace('select_project_', '');
     const projectName = interaction.values[0];
-    const projectPath = path.join(PROJECTS_BASE, projectName);
 
     await interaction.deferUpdate();
 
+    // Valida e sanitiza o caminho do projeto (prevenção de path traversal)
+    const resolvedBase = path.resolve(PROJECTS_BASE);
+    const projectPath = path.resolve(PROJECTS_BASE, projectName);
+    if (!projectPath.startsWith(resolvedBase + path.sep) && projectPath !== resolvedBase) {
+      return interaction.editReply({ content: '❌ Caminho de projeto inválido.', components: [] });
+    }
+    if (!existsSync(projectPath)) {
+      return interaction.editReply({
+        content: `❌ Projeto \`${projectName}\` não encontrado em \`${PROJECTS_BASE}\`.`,
+        components: [],
+      });
+    }
+
+    // Verifica se já existe sessão ativa para este projeto
+    const existing = sessionManager.getByProject(projectPath);
+    if (existing) {
+      return interaction.editReply({
+        content: `⚠️ Já existe uma sessão ativa para \`${projectName}\` nesta thread: <#${existing.threadId}>. Encerre-a primeiro com \`/parar\`.`,
+        components: [],
+      });
+    }
+
     const threadName = `${mode === 'plan' ? '📋 Plan' : '🔨 Build'} · ${projectName} · ${formatTime()}`;
-    const thread = await interaction.channel.threads.create({
+    const channel = interaction.channel ?? await interaction.client.channels.fetch(interaction.channelId);
+    const thread = await channel.threads.create({
       name: threadName,
       autoArchiveDuration: 1440,
     });
 
-    const session = sessionManager.create({
+    const session = await sessionManager.create({
       projectPath,
       threadId: thread.id,
       userId: interaction.user.id,
+      agent: mode,
     });
 
-    const { StreamHandler } = await import('./stream-handler.js');
     const streamHandler = new StreamHandler(thread, session);
     streamHandler.start();
-    session.start();
 
     await thread.send(buildSessionEmbed({ mode, projectName, projectPath, session }));
 
@@ -305,7 +392,7 @@ export async function handleInteraction(interaction, sessionManager) {
   // Botão confirmar stop
   if (interaction.customId.startsWith('confirm_stop_')) {
     const sessionId = interaction.customId.replace('confirm_stop_', '');
-    sessionManager.destroy(sessionId);
+    await sessionManager.destroy(sessionId);
     await interaction.update({ content: '✅ Sessão encerrada.', components: [] });
   }
 
@@ -317,6 +404,10 @@ export async function handleInteraction(interaction, sessionManager) {
 
 // ─── Utilitários ──────────────────────────────────────────────────────────────
 
+/**
+ * Lista os projetos disponíveis no diretório base
+ * @returns {string[]}
+ */
 function getProjects() {
   try {
     return readdirSync(PROJECTS_BASE, { withFileTypes: true })
@@ -328,6 +419,15 @@ function getProjects() {
   }
 }
 
+/**
+ * Constrói o embed inicial da sessão
+ * @param {object} opts
+ * @param {'plan'|'build'} opts.mode
+ * @param {string} opts.projectName
+ * @param {string} opts.projectPath
+ * @param {import('./session-manager.js').OpenCodeSession} opts.session
+ * @returns {{ embeds: import('discord.js').EmbedBuilder[] }}
+ */
 function buildSessionEmbed({ mode, projectName, projectPath, session }) {
   const embed = new EmbedBuilder()
     .setTitle(`${mode === 'plan' ? '📋 Sessão Plan' : '🔨 Sessão Build'} — ${projectName}`)
@@ -351,16 +451,10 @@ function buildSessionEmbed({ mode, projectName, projectPath, session }) {
   return { embeds: [embed] };
 }
 
+/**
+ * Formata a hora atual em HH:MM (pt-BR)
+ * @returns {string}
+ */
 function formatTime() {
   return new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-}
-
-function formatAge(date) {
-  const diff = Date.now() - new Date(date).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'agora';
-  if (mins < 60) return `${mins}min`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  return `${Math.floor(hrs / 24)}d`;
 }

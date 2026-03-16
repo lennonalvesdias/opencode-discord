@@ -7,14 +7,16 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "install-service": "node scripts/install-service.js"
+    "install-service": "powershell -ExecutionPolicy Bypass -File scripts/install-service.ps1"
   },
   "dependencies": {
     "discord.js": "^14.18.0",
-    "dotenv": "^16.4.5",
-    "node-pty": "^1.0.0"
+    "dotenv": "^16.4.5"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "overrides": {
+    "undici": "^6.24.1"
   }
 }

@@ -8,9 +8,12 @@ import {
   Partials,
   REST,
   Routes,
+  MessageFlags,
 } from 'discord.js';
 import { SessionManager } from './session-manager.js';
-import { handleCommand, handleInteraction, commandDefinitions } from './commands.js';
+import { ServerManager } from './server-manager.js';
+import { handleCommand, handleInteraction, handleAutocomplete, commandDefinitions } from './commands.js';
+import { formatAge, debug } from './utils.js';
 
 // ─── Validação de configuração ────────────────────────────────────────────────
 
@@ -24,7 +27,11 @@ if (missing.length > 0) {
 
 // ─── Inicialização ─────────────────────────────────────────────────────────────
 
-const sessionManager = new SessionManager();
+const serverManager = new ServerManager();
+const sessionManager = new SessionManager(serverManager);
+
+const ALLOWED_USERS = (process.env.ALLOWED_USER_IDS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 
 const client = new Client({
   intents: [
@@ -57,24 +64,26 @@ async function registerCommands() {
 
 // ─── Eventos do Discord ───────────────────────────────────────────────────────
 
-client.once('ready', async (c) => {
+client.once('clientReady', async (c) => {
   console.log(`\n🤖 Bot online: ${c.user.tag}`);
   console.log(`📁 Projetos: ${process.env.PROJECTS_BASE_PATH}`);
   console.log(`🔧 OpenCode: ${process.env.OPENCODE_BIN || 'opencode'}\n`);
   await registerCommands();
 });
 
-// Slash commands
+// Slash commands, autocomplete e interações de componentes
 client.on('interactionCreate', async (interaction) => {
   try {
-    if (interaction.isChatInputCommand()) {
+    if (interaction.isAutocomplete()) {
+      await handleAutocomplete(interaction);
+    } else if (interaction.isChatInputCommand()) {
       await handleCommand(interaction, sessionManager);
     } else {
       await handleInteraction(interaction, sessionManager);
     }
   } catch (err) {
     console.error('[interactionCreate] Erro:', err);
-    const reply = { content: `❌ Erro interno: ${err.message}`, ephemeral: true };
+    const reply = { content: '❌ Ocorreu um erro interno. Por favor, tente novamente.', flags: MessageFlags.Ephemeral };
     try {
       if (interaction.replied || interaction.deferred) {
         await interaction.followUp(reply);
@@ -93,6 +102,17 @@ client.on('messageCreate', async (message) => {
   // Só processa se estiver dentro de uma thread
   if (!message.channel.isThread()) return;
 
+  // Verificação de usuários autorizados
+  if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(message.author.id)) return;
+
+  // Restrição de canal (opcional)
+  const allowedChannelId = process.env.DISCORD_ALLOWED_CHANNEL_ID;
+  if (allowedChannelId) {
+    // Para threads, verificar o canal pai
+    const parentId = message.channel.parentId;
+    if (parentId !== allowedChannelId) return;
+  }
+
   // Verifica se existe uma sessão associada a essa thread
   const session = sessionManager.getByThread(message.channel.id);
   if (!session) return;
@@ -102,7 +122,7 @@ client.on('messageCreate', async (message) => {
 
   // Comandos especiais inline
   if (text === '/stop' || text === '/parar') {
-    session.kill();
+    await sessionManager.destroy(session.sessionId);
     await message.reply('🛑 Sessão encerrada.');
     return;
   }
@@ -116,15 +136,17 @@ client.on('messageCreate', async (message) => {
   }
 
   // Envia o input para o processo OpenCode
-  const sent = session.sendInput(text);
-
-  if (!sent) {
-    // Processo não está mais rodando
-    await message.reply(
-      '⚠️ O processo OpenCode não está ativo nesta sessão. Use `/plan` ou `/build` para iniciar uma nova.'
-    );
+  debug('Bot', `💬 mensagem na thread | threadId=${message.channel.id} | user=${message.author.tag} | texto=${JSON.stringify(text.slice(0, 80))}`);
+  debug('Bot', `🔗 sessão encontrada | sessionId=${session.sessionId} | status=${session.status}`);
+  try {
+    await session.sendMessage(text);
+  } catch (err) {
+    debug('index', '❌ Erro ao enviar mensagem:', err.message);
+    await message.reply('⚠️ O processo OpenCode não está ativo nesta sessão. Use `/plan` ou `/build` para iniciar uma nova.').catch(() => {});
     return;
   }
+
+  debug('Bot', `↩️  input encaminhado para opencode`);
 
   // Reação visual de "recebido"
   try {
@@ -134,10 +156,11 @@ client.on('messageCreate', async (message) => {
 
 // ─── Graceful shutdown ─────────────────────────────────────────────────────────
 
-function shutdown(signal) {
+async function shutdown(signal) {
   console.log(`\n${signal} recebido. Encerrando sessões...`);
   const sessions = sessionManager.getAll();
-  sessions.forEach((s) => s.kill());
+  await Promise.allSettled(sessions.map((s) => s.close()));
+  await serverManager.stopAll();
   client.destroy();
   process.exit(0);
 }
@@ -154,15 +177,3 @@ process.on('unhandledRejection', (reason) => {
 // ─── Login ────────────────────────────────────────────────────────────────────
 
 client.login(process.env.DISCORD_TOKEN);
-
-// ─── Utilitários ──────────────────────────────────────────────────────────────
-
-function formatAge(date) {
-  const diff = Date.now() - new Date(date).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'agora';
-  if (mins < 60) return `${mins}min`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  return `${Math.floor(hrs / 24)}d`;
-}

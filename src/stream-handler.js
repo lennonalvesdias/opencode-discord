@@ -1,6 +1,8 @@
 // src/stream-handler.js
 // Captura o output do OpenCode e atualiza mensagens Discord em tempo real
 
+import { debug } from './utils.js';
+
 const UPDATE_INTERVAL = parseInt(process.env.STREAM_UPDATE_INTERVAL || '1500');
 const MSG_LIMIT = parseInt(process.env.DISCORD_MSG_LIMIT || '1900');
 
@@ -9,14 +11,25 @@ const MSG_LIMIT = parseInt(process.env.DISCORD_MSG_LIMIT || '1900');
  * Usa edição de mensagem + criação de novas mensagens para simular streaming.
  */
 export class StreamHandler {
+  /**
+   * @param {import('discord.js').ThreadChannel} thread - Thread Discord alvo
+   * @param {import('./session-manager.js').OpenCodeSession} session - Sessão associada
+   */
   constructor(thread, session) {
     this.thread = thread;
     this.session = session;
     this.currentMessage = null;
+    this.currentRawContent = '';
+    this.currentMessageLength = 0;
     this.currentContent = '';
     this.updateTimer = null;
     this.isProcessing = false;
     this.messageQueue = [];
+    // Fila de eventos de status para evitar chamadas concorrentes à API Discord
+    this._statusQueue = [];
+    this._processingStatus = false;
+    // Flag para saber se já houve output (evita "Processando" redundante)
+    this.hasOutput = false;
   }
 
   /**
@@ -25,27 +38,73 @@ export class StreamHandler {
   start() {
     // Ouve output da sessão
     this.session.on('output', (chunk) => {
+      debug('StreamHandler', `🔔 output event (${chunk.length} chars) | hasOutput=${this.hasOutput} | buffered=${this.currentContent.length} chars`);
+      this.hasOutput = true;
       this.currentContent += chunk;
       this.scheduleUpdate();
     });
 
-    // Quando a sessão muda de status
-    this.session.on('status', async (status) => {
-      // Força flush imediato ao mudar status
-      await this.flush();
-      await this.sendStatusMessage(status);
+    // Quando a sessão muda de status — usa fila para evitar burst de rate limit
+    this.session.on('status', (status) => {
+      this._statusQueue.push(async () => {
+        await this.flush();
+        await this.sendStatusMessage(status);
+      });
+      this._drainStatusQueue();
     });
 
-    // Quando o processo fecha
-    this.session.on('close', async (code) => {
+    // Quando o processo fecha — flush final, para o handler e arquiva a thread
+    this.session.on('close', async () => {
       await this.flush();
+      this.stop();
+      // Arquiva a thread após 5 segundos para dar tempo de ler a mensagem final
+      setTimeout(async () => {
+        try {
+          await this.thread.setArchived(true);
+        } catch (err) {
+          console.error('[StreamHandler] Erro ao arquivar thread:', err.message);
+        }
+      }, 5000);
     });
+
+    // Quando o servidor reinicia — envia aviso e reseta o bloco atual
+    this.session.on('server-restart', () => {
+      this.sendStatusMessage('restart');
+    });
+
+    // Garante que erros emitidos pela sessão sejam tratados (Node exige ao menos um listener)
+    this.session.on('error', (err) => {
+      console.error('[StreamHandler] ❌ Erro na sessão:', err.message);
+      // status 'error' já tratado via listener 'status'
+    });
+  }
+
+  /**
+   * Drena a fila de eventos de status sequencialmente para evitar race conditions
+   */
+  async _drainStatusQueue() {
+    if (this._processingStatus) return;
+    this._processingStatus = true;
+    try {
+      while (this._statusQueue.length > 0) {
+        const fn = this._statusQueue.shift();
+        debug('StreamHandler', `⚙️  drenando fila de status | ${this._statusQueue.length + 1} item(s) restante(s)`);
+        try {
+          await fn();
+        } catch (err) {
+          console.error('[StreamHandler] Erro ao processar status:', err.message);
+        }
+      }
+    } finally {
+      this._processingStatus = false;
+    }
   }
 
   /**
    * Agenda um update de mensagem (debounced para evitar rate limit)
    */
   scheduleUpdate() {
+    debug('StreamHandler', `⏱️  scheduleUpdate | timer ativo=${!!this.updateTimer}`);
     if (this.updateTimer) return;
     this.updateTimer = setTimeout(async () => {
       this.updateTimer = null;
@@ -62,8 +121,9 @@ export class StreamHandler {
     const content = this.currentContent;
     this.currentContent = '';
 
-    // Divide em chunks se necessário (limite Discord: 2000 chars)
-    const chunks = splitIntoChunks(content, MSG_LIMIT);
+    // Divide em chunks respeitando o limite Discord (descontando overhead do code block)
+    const chunks = splitIntoChunks(content, MSG_LIMIT - 8);
+    debug('StreamHandler', `🚿 flush iniciado | conteúdo=${content.length} chars | chunks a enviar=${chunks.length}`);
 
     for (const chunk of chunks) {
       if (!chunk.trim()) continue;
@@ -80,7 +140,8 @@ export class StreamHandler {
           const newContent = mergeContent(this.currentRawContent, chunk);
           const newFormatted = formatAsCodeBlock(newContent);
 
-          if (newFormatted.length <= 2000) {
+          if (newFormatted.length <= 1990) {  // limite rígido com margem de segurança
+            debug('StreamHandler', `✏️  editando mensagem existente (${newFormatted.length} chars)`);
             await this.currentMessage.edit(newFormatted);
             this.currentRawContent = newContent;
             this.currentMessageLength = newFormatted.length;
@@ -89,10 +150,12 @@ export class StreamHandler {
         }
 
         // Caso contrário, cria nova mensagem
+        debug('StreamHandler', `📨 criando nova mensagem (${formatted.length} chars)`);
         this.currentMessage = await this.thread.send(formatted);
         this.currentRawContent = chunk;
         this.currentMessageLength = formatted.length;
       } catch (err) {
+        debug('StreamHandler', `❌ erro ao enviar: ${err.message}`);
         console.error('[StreamHandler] Erro ao enviar mensagem:', err.message);
         // Fallback: tenta enviar como texto simples
         try {
@@ -104,27 +167,36 @@ export class StreamHandler {
 
   /**
    * Envia mensagem de status visual
+   * @param {string} status - Status atual da sessão
    */
   async sendStatusMessage(status) {
+    debug('StreamHandler', `📊 sendStatusMessage | status=${status} | hasOutput=${this.hasOutput}`);
     const icons = {
-      running:       '⚙️ **Processando...**',
-      waiting_input: '💬 **Aguardando sua resposta** — responda nesta thread',
-      finished:      '✅ **Sessão concluída**',
-      error:         '❌ **Sessão encerrada com erro**',
-      idle:          '💤 **Idle**',
+      running:  '⚙️ **Processando...**',
+      finished: '✅ **Sessão concluída**',
+      error:    '❌ **Sessão encerrada com erro**',
+      restart:  '⚠️ Servidor reiniciando...',
+      idle:     '💤 **Idle**',
     };
 
     const msg = icons[status];
     if (!msg) return;
 
     try {
-      // Encerra com status visual separado
-      if (status === 'waiting_input' || status === 'finished' || status === 'error') {
+      // Envia "Processando" apenas no início, antes de qualquer output
+      if (status === 'running' && !this.hasOutput) {
+        await this.thread.send('⚙️ **Processando...**');
+        return;
+      }
+
+      // Para estados finais, envia status visual e reseta o bloco atual
+      if (status === 'finished' || status === 'error' || status === 'restart') {
         await this.thread.send(msg);
         // Reseta current message para próximo bloco começar fresco
         this.currentMessage = null;
         this.currentRawContent = '';
         this.currentMessageLength = 0;
+        this.hasOutput = false;
       }
     } catch (err) {
       console.error('[StreamHandler] Erro ao enviar status:', err.message);
@@ -146,16 +218,21 @@ export class StreamHandler {
 
 /**
  * Envolve conteúdo em bloco de código para melhor legibilidade no Discord
+ * @param {string} content
+ * @returns {string}
  */
 function formatAsCodeBlock(content) {
   const trimmed = content.trim();
   if (!trimmed) return '';
-  // Se já tem muito código, usa bloco; caso contrário, texto simples
+  // Overhead do bloco de código: ``` + \n + ... + \n + ``` = 8 chars
   return `\`\`\`\n${trimmed}\n\`\`\``;
 }
 
 /**
  * Divide texto longo em pedaços respeitando o limite do Discord
+ * @param {string} text
+ * @param {number} limit
+ * @returns {string[]}
  */
 function splitIntoChunks(text, limit) {
   const chunks = [];
@@ -180,12 +257,21 @@ function splitIntoChunks(text, limit) {
 
 /**
  * Mescla conteúdo anterior com novo conteúdo
+ * @param {string} existing
+ * @param {string} newChunk
+ * @returns {string}
  */
 function mergeContent(existing, newChunk) {
   if (!existing) return newChunk;
   return existing + '\n' + newChunk;
 }
 
+/**
+ * Trunca string ao tamanho máximo com reticências
+ * @param {string} str
+ * @param {number} max
+ * @returns {string}
+ */
 function truncate(str, max) {
   return str.length > max ? str.slice(0, max - 3) + '...' : str;
 }

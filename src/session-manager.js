@@ -1,119 +1,201 @@
 // src/session-manager.js
-// Gerencia múltiplas sessões OpenCode simultâneas, uma por projeto/thread
+// Gerencia múltiplas sessões OpenCode via HTTP/SSE (opencode serve)
 
-import { spawn } from 'child_process';
+// ─── Imports ──────────────────────────────────────────────────────────────────
+
 import { EventEmitter } from 'events';
-import path from 'path';
+import { randomUUID } from 'crypto';
+import { basename } from 'path';
+import { stripAnsi, debug } from './utils.js';
+import { ServerManager } from './server-manager.js';
 
-const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode';
+// ─── Configuração ─────────────────────────────────────────────────────────────
+
+/** Limite máximo do buffer de output (500 KB) */
+const MAX_BUFFER = 512_000;
+
+// ─── OpenCodeSession ──────────────────────────────────────────────────────────
 
 /**
- * Representa uma sessão OpenCode ativa ligada a uma thread Discord
+ * Representa uma sessão OpenCode ativa ligada a uma thread Discord.
+ * Comunica-se com o servidor OpenCode via HTTP/SSE.
  */
-export class OpenCodeSession extends EventEmitter {
-  constructor({ sessionId, projectPath, threadId, userId }) {
+class OpenCodeSession extends EventEmitter {
+  /**
+   * @param {object} opts
+   * @param {string} opts.sessionId - Identificador UUID interno (chave do thread Discord)
+   * @param {string} opts.projectPath - Caminho absoluto do projeto
+   * @param {string} opts.threadId - ID da thread Discord associada
+   * @param {string} opts.userId - ID do usuário Discord que iniciou a sessão
+   * @param {'plan'|'build'} opts.agent - Agente a ser utilizado
+   */
+  constructor({ sessionId, projectPath, threadId, userId, agent }) {
     super();
     this.sessionId = sessionId;
     this.projectPath = projectPath;
     this.threadId = threadId;
     this.userId = userId;
-    this.process = null;
-    this.status = 'idle'; // idle | running | waiting_input | finished | error
-    this.createdAt = new Date();
-    this.lastActivityAt = new Date();
+    this.agent = agent;
+    this.status = 'idle';
+    this.apiSessionId = null;
+    this.server = null;
     this.outputBuffer = '';
     this.pendingOutput = '';
+    this.createdAt = new Date();
+    this.closedAt = null;
   }
 
   /**
-   * Inicia o processo OpenCode nesta sessão
+   * Inicia a sessão obtendo ou criando um servidor para o projeto e
+   * registrando uma sessão na API do OpenCode.
+   * @param {ServerManager} serverManager
    */
-  start() {
-    if (this.process) return;
+  async start(serverManager) {
+    this.status = 'idle';
 
-    this.status = 'running';
-    this.emit('status', 'running');
+    this.server = await serverManager.getOrCreate(this.projectPath);
 
-    // Inicia o opencode no diretório do projeto
-    this.process = spawn(OPENCODE_BIN, [], {
-      cwd: this.projectPath,
-      shell: true,
-      // Sem PTY — usamos pipes para capturar output limpo
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: false,
-      env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+    const apiSession = await this.server.client.createSession();
+    this.apiSessionId = apiSession.id;
+
+    this.server.registerSession(this.apiSessionId, this);
+
+    debug('OpenCodeSession', '✅ Sessão API criada: %s (sessão interna: %s)', this.apiSessionId, this.sessionId);
+
+    this.emit('status', 'idle');
+
+    this.server.on('restart', () => {
+      this.emit('server-restart');
     });
 
-    this.process.stdout.setEncoding('utf8');
-    this.process.stderr.setEncoding('utf8');
-
-    // Captura saída padrão
-    this.process.stdout.on('data', (data) => {
-      this.lastActivityAt = new Date();
-      const clean = stripAnsi(data);
-      this.outputBuffer += clean;
-      this.pendingOutput += clean;
-      this.emit('output', clean);
-
-      // Detecta se o agente está esperando input do usuário
-      if (this.isWaitingForInput(clean)) {
-        this.status = 'waiting_input';
-        this.emit('status', 'waiting_input');
-      }
-    });
-
-    // Captura stderr (erros e warnings do opencode)
-    this.process.stderr.on('data', (data) => {
-      this.lastActivityAt = new Date();
-      const clean = stripAnsi(data);
-      this.pendingOutput += `⚠️ ${clean}`;
-      this.emit('output', `⚠️ ${clean}`);
-    });
-
-    // Processo encerrou
-    this.process.on('close', (code) => {
-      this.status = code === 0 ? 'finished' : 'error';
-      this.process = null;
-      this.emit('status', this.status);
-      this.emit('close', code);
-    });
-
-    this.process.on('error', (err) => {
+    this.server.on('fatal', (err) => {
       this.status = 'error';
-      this.emit('error', err);
+      this.emit('status', 'error');
+      this.emit('error', new Error(`Servidor fatal: ${err?.message ?? err}`));
     });
   }
 
   /**
-   * Envia input do usuário para o processo (stdin)
+   * Envia uma mensagem de texto para o agente OpenCode.
+   * @param {string} text - Mensagem a ser enviada
    */
-  sendInput(text) {
-    if (!this.process || !this.process.stdin.writable) {
-      return false;
+  async sendMessage(text) {
+    if (this.status === 'finished' || this.status === 'error') {
+      throw new Error('Sessão encerrada');
     }
-    this.lastActivityAt = new Date();
+
     this.status = 'running';
     this.emit('status', 'running');
-    this.process.stdin.write(text + '\n');
-    return true;
+
+    await this.server.client.sendMessage(this.apiSessionId, this.agent, text);
+
+    debug('OpenCodeSession', '📨 Mensagem enviada: %s...', text.slice(0, 50));
   }
 
   /**
-   * Encerra a sessão forçadamente
+   * Aborta a execução atual da sessão.
    */
-  kill() {
-    if (this.process) {
-      this.process.kill('SIGTERM');
-      setTimeout(() => {
-        if (this.process) this.process.kill('SIGKILL');
-      }, 3000);
-    }
-    this.status = 'finished';
-    this.emit('status', 'finished');
+  async abort() {
+    if (!this.apiSessionId) return;
+
+    await this.server.client.abortSession(this.apiSessionId);
+
+    debug('OpenCodeSession', '🛑 Sessão abortada: %s', this.apiSessionId);
   }
 
   /**
-   * Consome e limpa o buffer de output pendente
+   * Encerra a sessão, remove o registro no servidor e emite os eventos finais.
+   */
+  async close() {
+    if (this.apiSessionId && this.server) {
+      try {
+        await this.server.client.deleteSession(this.apiSessionId);
+      } catch (err) {
+        console.error('[OpenCodeSession] ⚠️ Erro ao deletar sessão na API:', err.message);
+      }
+      this.server.deregisterSession(this.apiSessionId);
+    }
+
+    this.status = 'finished';
+    this.closedAt = new Date();
+    this.emit('status', 'finished');
+    this.emit('close');
+
+    console.log('[OpenCodeSession] ✅ Sessão encerrada: %s', this.sessionId);
+  }
+
+  /**
+   * Processa um evento SSE despachado pelo OpenCodeServer.
+   * @param {{ type: string, data: object, id?: string }} event
+   */
+  handleSSEEvent(event) {
+    const type = event.type; // já desempacotado pelo server-manager para o tipo real
+    const props = event.data?.properties ?? {};
+
+    switch (type) {
+      case 'message.part.delta': {
+        // Só processar deltas de texto (não reasoning)
+        if (props.field !== 'text') return;
+        const delta = props.delta ?? '';
+        if (!delta) return;
+
+        const clean = stripAnsi(delta);
+        this.outputBuffer += clean;
+        this.pendingOutput += clean;
+
+        if (this.outputBuffer.length > MAX_BUFFER) {
+          this.outputBuffer = this.outputBuffer.slice(-MAX_BUFFER);
+        }
+
+        this.emit('output', clean);
+        break;
+      }
+
+      case 'session.status': {
+        const statusType = props.status?.type;
+        if (statusType === 'idle' && this.status === 'running') {
+          this.status = 'idle';
+          this.emit('status', 'finished');
+        }
+        break;
+      }
+
+      case 'session.idle': {
+        // Evento alternativo de conclusão
+        if (this.status === 'running') {
+          this.status = 'idle';
+          this.emit('status', 'finished');
+        }
+        break;
+      }
+
+      case 'session.error': {
+        this.status = 'error';
+        this.emit('status', 'error');
+        this.emit('error', new Error(props.error ?? props.message ?? 'Erro desconhecido na sessão'));
+        break;
+      }
+
+      case 'permission.asked': {
+        const permissionId = props.id ?? props.permissionId ?? props.permission?.id;
+        if (permissionId) {
+          this.server.client
+            .approvePermission(this.apiSessionId, permissionId)
+            .catch((err) => console.error('[OpenCodeSession] Erro ao aprovar permissão:', err.message));
+          debug('OpenCodeSession', '✅ Permissão aprovada automaticamente: %s', permissionId);
+        }
+        break;
+      }
+
+      default:
+        // Ignorar tipos não tratados silenciosamente
+        break;
+    }
+  }
+
+  /**
+   * Consome e limpa o buffer de output pendente.
+   * @returns {string}
    */
   flushPending() {
     const out = this.pendingOutput;
@@ -122,121 +204,138 @@ export class OpenCodeSession extends EventEmitter {
   }
 
   /**
-   * Heurística para detectar se o agente está aguardando resposta do usuário
-   */
-  isWaitingForInput(text) {
-    const patterns = [
-      /\?\s*$/m,               // termina com "?"
-      /\(y\/n\)/i,             // pergunta y/n
-      /press enter/i,
-      /aguard/i,               // aguardando...
-      /confirma/i,
-      /escolha:/i,
-      /selecione:/i,
-      /continua/i,
-      /> $/m,                  // prompt ">"
-    ];
-    return patterns.some((p) => p.test(text));
-  }
-
-  /**
-   * Retorna info resumida da sessão
+   * Retorna um resumo serializado da sessão.
+   * @returns {object}
    */
   toSummary() {
     return {
       sessionId: this.sessionId,
-      project: path.basename(this.projectPath),
       projectPath: this.projectPath,
-      status: this.status,
       threadId: this.threadId,
       userId: this.userId,
+      agent: this.agent,
+      status: this.status,
+      apiSessionId: this.apiSessionId,
       createdAt: this.createdAt,
-      lastActivityAt: this.lastActivityAt,
+      closedAt: this.closedAt,
+      project: basename(this.projectPath),
+      lastActivityAt: this.closedAt ?? this.createdAt,
     };
   }
 }
 
+// ─── SessionManager ───────────────────────────────────────────────────────────
+
 /**
- * Gerencia todas as sessões ativas
+ * Gerencia todas as sessões OpenCode ativas, indexadas por sessionId e threadId.
  */
-export class SessionManager {
-  constructor() {
-    // Map<sessionId, OpenCodeSession>
-    this.sessions = new Map();
-    // Map<threadId, sessionId> — para encontrar sessão pelo thread Discord
-    this.threadIndex = new Map();
+class SessionManager {
+  /**
+   * @param {ServerManager} serverManager - Instância do gerenciador de servidores
+   */
+  constructor(serverManager) {
+    this.serverManager = serverManager;
+    /** @type {Map<string, OpenCodeSession>} */
+    this._sessions = new Map();
+    /** @type {Map<string, string>} */
+    this._threadIndex = new Map();
   }
 
   /**
-   * Cria uma nova sessão para um projeto
+   * Cria uma nova sessão para um projeto e a registra nos índices internos.
+   * @param {object} opts
+   * @param {string} opts.projectPath - Caminho absoluto do projeto
+   * @param {string} opts.threadId - ID da thread Discord
+   * @param {string} opts.userId - ID do usuário Discord
+   * @param {'plan'|'build'} opts.agent - Agente a ser utilizado
+   * @returns {Promise<OpenCodeSession>}
    */
-  create({ projectPath, threadId, userId }) {
-    const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const session = new OpenCodeSession({ sessionId, projectPath, threadId, userId });
+  async create({ projectPath, threadId, userId, agent }) {
+    const sessionId = randomUUID();
+    const session = new OpenCodeSession({ sessionId, projectPath, threadId, userId, agent });
 
-    this.sessions.set(sessionId, session);
-    this.threadIndex.set(threadId, sessionId);
+    this._sessions.set(sessionId, session);
+    this._threadIndex.set(threadId, sessionId);
 
-    // Remove da memória quando encerrar
-    session.on('close', () => {
+    session.once('close', () => {
       setTimeout(() => {
-        // Mantém por 10 min para consulta de histórico
-        setTimeout(() => {
-          this.sessions.delete(sessionId);
-          if (this.threadIndex.get(threadId) === sessionId) {
-            this.threadIndex.delete(threadId);
-          }
-        }, 10 * 60 * 1000);
-      }, 0);
+        this._sessions.delete(sessionId);
+        this._threadIndex.delete(threadId);
+        debug('SessionManager', '🗑️ Sessão removida do cache: %s', sessionId);
+      }, 10 * 60 * 1000);
     });
+
+    console.log('[SessionManager] ✅ Sessão criada: %s (projeto: %s)', sessionId, projectPath);
+
+    await session.start(this.serverManager);
 
     return session;
   }
 
   /**
-   * Busca sessão pelo ID da thread Discord
+   * Busca sessão pelo ID da thread Discord.
+   * @param {string} threadId
+   * @returns {OpenCodeSession | undefined}
    */
   getByThread(threadId) {
-    const sessionId = this.threadIndex.get(threadId);
-    return sessionId ? this.sessions.get(sessionId) : null;
+    const id = this._threadIndex.get(threadId);
+    return this._sessions.get(id);
   }
 
   /**
-   * Busca sessão pelo ID da sessão
+   * Busca sessão pelo seu identificador interno.
+   * @param {string} sessionId
+   * @returns {OpenCodeSession | undefined}
    */
   getById(sessionId) {
-    return this.sessions.get(sessionId);
+    return this._sessions.get(sessionId);
   }
 
   /**
-   * Lista todas as sessões de um usuário
+   * Lista todas as sessões pertencentes a um usuário.
+   * @param {string} userId
+   * @returns {OpenCodeSession[]}
    */
   getByUser(userId) {
-    return [...this.sessions.values()].filter((s) => s.userId === userId);
+    return [...this._sessions.values()].filter((s) => s.userId === userId);
   }
 
   /**
-   * Retorna todas as sessões ativas
+   * Retorna a primeira sessão ativa (não encerrada) para o caminho do projeto.
+   * @param {string} projectPath
+   * @returns {OpenCodeSession | undefined}
+   */
+  getByProject(projectPath) {
+    return [...this._sessions.values()].find(
+      (s) => s.projectPath === projectPath && s.status !== 'finished' && s.status !== 'error',
+    );
+  }
+
+  /**
+   * Retorna todas as sessões registradas.
+   * @returns {OpenCodeSession[]}
    */
   getAll() {
-    return [...this.sessions.values()];
+    return [...this._sessions.values()];
   }
 
   /**
-   * Encerra e remove uma sessão
+   * Encerra e remove imediatamente uma sessão pelos índices internos.
+   * @param {string} sessionId
    */
-  destroy(sessionId) {
-    const session = this.sessions.get(sessionId);
-    if (session) {
-      session.kill();
-      this.sessions.delete(sessionId);
-      this.threadIndex.delete(session.threadId);
-    }
+  async destroy(sessionId) {
+    const session = this._sessions.get(sessionId);
+    if (!session) return;
+
+    await session.close();
+
+    this._sessions.delete(sessionId);
+    this._threadIndex.delete(session.threadId);
+
+    console.log('[SessionManager] 🗑️ Sessão destruída: %s', sessionId);
   }
 }
 
-// ─── Utilitário: remove códigos ANSI/escape do terminal ──────────────────────
-function stripAnsi(str) {
-  // eslint-disable-next-line no-control-regex
-  return str.replace(/\x1B\[[0-9;]*[mGKHF]/g, '').replace(/\x1B\][^\x07]*\x07/g, '');
-}
+// ─── Exports ──────────────────────────────────────────────────────────────────
+
+export { OpenCodeSession, SessionManager };
