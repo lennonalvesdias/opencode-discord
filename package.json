@@ -1,0 +1,20 @@
+{
+  "name": "opencode-discord-bridge",
+  "version": "1.0.0",
+  "description": "Bridge between Discord and OpenCode CLI for remote development sessions",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "install-service": "node scripts/install-service.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.5",
+    "node-pty": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
