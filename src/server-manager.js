@@ -7,11 +7,7 @@ import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { OpenCodeClient } from './opencode-client.js';
 import { debug } from './utils.js';
-
-// ─── Configuração ─────────────────────────────────────────────────────────────
-
-const OPENCODE_BIN = process.env.OPENCODE_BIN || 'opencode';
-const OPENCODE_BASE_PORT = parseInt(process.env.OPENCODE_BASE_PORT || '4100', 10);
+import { OPENCODE_BIN, OPENCODE_BASE_PORT } from './config.js';
 
 /**
  * Tipos SSE que nunca carregam sessionID em properties.sessionID
@@ -20,13 +16,24 @@ const OPENCODE_BASE_PORT = parseInt(process.env.OPENCODE_BASE_PORT || '4100', 10
 const IGNORED_TYPES = new Set([
   'session.created',
   'session.updated',
-  'session.diff',
   'message.updated',
   'message.part.updated',
   'file.watcher.updated',
   'server.heartbeat',
   'server.connected',
 ]);
+
+/**
+ * Whitelist de variáveis de ambiente seguras para repassar ao child process.
+ * Evita vazar DISCORD_TOKEN e outras credenciais do bot.
+ */
+const ENV_ALLOWLIST = /^(PATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP|OPENCODE_|ANTHROPIC_|XDG_|LANG|LC_|TERM|SHELL|USER|LOGNAME|HOSTNAME|SystemRoot|SYSTEMROOT|windir|COMSPEC|ProgramFiles|ProgramData|CommonProgramFiles|NUMBER_OF_PROCESSORS|PROCESSOR_|OS)$/i;
+
+function sanitizeEnvForChild() {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => ENV_ALLOWLIST.test(key))
+  );
+}
 
 // ─── OpenCodeServer ───────────────────────────────────────────────────────────
 
@@ -78,8 +85,9 @@ class OpenCodeServer extends EventEmitter {
       {
         cwd: this.projectPath,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
         env: {
-          ...process.env,
+          ...sanitizeEnvForChild(),
           OPENCODE_DISABLE_AUTOUPDATE: 'true',
           OPENCODE_DISABLE_TERMINAL_TITLE: 'true',
         },
@@ -146,20 +154,41 @@ class OpenCodeServer extends EventEmitter {
 
   /**
    * Estabelece a conexão SSE com o servidor para receber eventos em tempo real.
+   * Reconecta automaticamente com backoff exponencial em caso de falha.
+   * @param {number} [attempt=0] - Tentativa atual de reconexão
    */
-  connectSSE() {
+  connectSSE(attempt = 0) {
     this.sseAbortController = new AbortController();
+
+    const reconnect = (err) => {
+      if (this.status === 'stopped') return;
+      if (err?.name === 'AbortError') return;
+
+      const maxDelay = 30_000;
+      const delay = Math.min(1000 * Math.pow(2, attempt), maxDelay);
+
+      debug('OpenCodeServer', '🔄 SSE desconectado (tentativa %d) — reconectando em %dms: %s', attempt + 1, delay, err?.message ?? 'stream encerrado');
+      this.emit('sse-reconnecting', { attempt: attempt + 1, delay });
+
+      setTimeout(() => {
+        if (this.status !== 'stopped') {
+          this.connectSSE(attempt + 1);
+        }
+      }, delay);
+    };
 
     // Fire-and-forget — a promise roda em background
     this.client.connectSSE(
       this.sseAbortController.signal,
-      (event) => this._dispatchSSEEvent(event),
-      (err) => {
-        if (err.name !== 'AbortError') {
-          debug('OpenCodeServer', 'Erro SSE: %s', err.message);
-        }
-      }
-    );
+      (event) => {
+        attempt = 0; // Reset do backoff ao receber evento com sucesso
+        this._dispatchSSEEvent(event);
+      },
+      reconnect,
+    ).then(() => {
+      // Stream encerrou normalmente — reconectar
+      reconnect();
+    }).catch(reconnect);
 
     debug('OpenCodeServer', '🔌 SSE conectado na porta %d', this.port);
   }
@@ -231,9 +260,17 @@ class OpenCodeServer extends EventEmitter {
     }
 
     if (this.process) {
-      spawn('taskkill', ['/pid', String(this.process.pid), '/T', '/F'], {
-        stdio: 'ignore',
-      });
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', String(this.process.pid), '/T', '/F'], {
+          stdio: 'ignore',
+        });
+      } else {
+        try {
+          process.kill(-this.process.pid, 'SIGTERM');
+        } catch {
+          this.process.kill('SIGTERM');
+        }
+      }
     }
 
     console.log('[OpenCodeServer] 🔴 Servidor parado — porta %d', this.port);

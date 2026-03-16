@@ -9,18 +9,17 @@ import {
   ButtonBuilder,
   ButtonStyle,
   MessageFlags,
+  AttachmentBuilder,
 } from 'discord.js';
 import { readdirSync, existsSync } from 'fs';
 import path from 'path';
 import { StreamHandler } from './stream-handler.js';
-import { formatAge } from './utils.js';
+import { formatAge, debug } from './utils.js';
 import { listOpenCodeCommands } from './opencode-commands.js';
+import { PROJECTS_BASE, ALLOWED_USERS, validateProjectPath, MAX_SESSIONS_PER_USER } from './config.js';
+import { RateLimiter } from './rate-limiter.js';
 
-const PROJECTS_BASE = process.env.PROJECTS_BASE_PATH || 'C:\\projetos';
-const ALLOWED_USERS = (process.env.ALLOWED_USER_IDS || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+const commandRateLimiter = new RateLimiter({ maxActions: 5, windowMs: 60_000 });
 
 const STATUS_EMOJI = { running: '⚙️', waiting_input: '💬', finished: '✅', error: '❌', idle: '💤' };
 
@@ -70,6 +69,10 @@ export const commandDefinitions = [
     .setDescription('Lista os projetos disponíveis em PROJECTS_BASE_PATH'),
 
   new SlashCommandBuilder()
+    .setName('historico')
+    .setDescription('Baixa o output completo da sessão como arquivo de texto'),
+
+  new SlashCommandBuilder()
     .setName('comando')
     .setDescription('Executa um comando opencode personalizado na sessão atual')
     .addStringOption((o) =>
@@ -101,6 +104,16 @@ export async function handleCommand(interaction, sessionManager) {
     });
   }
 
+  // Rate limiting por usuário
+  const { allowed, retryAfterMs } = commandRateLimiter.check(interaction.user.id);
+  if (!allowed) {
+    const seconds = Math.ceil(retryAfterMs / 1000);
+    return interaction.reply({
+      content: `⏳ Rate limit atingido. Tente novamente em ${seconds}s.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
   const { commandName } = interaction;
 
   if (commandName === 'plan' || commandName === 'build') {
@@ -113,6 +126,8 @@ export async function handleCommand(interaction, sessionManager) {
     await handleStop(interaction, sessionManager);
   } else if (commandName === 'projetos') {
     await handleListProjects(interaction);
+  } else if (commandName === 'historico') {
+    await handleHistory(interaction, sessionManager);
   } else if (commandName === 'comando') {
     await handleRunCommand(interaction, sessionManager);
   }
@@ -189,13 +204,21 @@ async function handleStartSession(interaction, sessionManager, mode) {
   }
 
   // Valida e sanitiza o caminho do projeto (prevenção de path traversal)
-  const resolvedBase = path.resolve(PROJECTS_BASE);
-  const projectPath = path.resolve(PROJECTS_BASE, projectName);
-  if (!projectPath.startsWith(resolvedBase + path.sep) && projectPath !== resolvedBase) {
-    return interaction.editReply('❌ Caminho de projeto inválido.');
+  const { valid, projectPath, error } = validateProjectPath(projectName);
+  if (!valid) {
+    return interaction.editReply(error);
   }
   if (!existsSync(projectPath)) {
     return interaction.editReply(`❌ Projeto \`${projectName}\` não encontrado em \`${PROJECTS_BASE}\`.`);
+  }
+
+  // Verifica limite de sessões ativas por usuário
+  const userSessions = sessionManager.getByUser(interaction.user.id)
+    .filter((s) => s.status !== 'finished' && s.status !== 'error');
+  if (userSessions.length >= MAX_SESSIONS_PER_USER) {
+    return interaction.editReply(
+      `⚠️ Limite de ${MAX_SESSIONS_PER_USER} sessões ativas atingido. Encerre uma sessão existente com \`/parar\`.`
+    );
   }
 
   // Verifica se já existe sessão ativa para este projeto
@@ -206,27 +229,13 @@ async function handleStartSession(interaction, sessionManager, mode) {
     );
   }
 
-  // Cria thread para a sessão
-  const threadName = `${mode === 'plan' ? '📋 Plan' : '🔨 Build'} · ${projectName} · ${formatTime()}`;
-  const thread = await interaction.channel.threads.create({
-    name: threadName,
-    autoArchiveDuration: 1440, // 24h
-    reason: `Sessão OpenCode ${mode} para ${projectName}`,
-  });
-
-  // Cria e inicia a sessão
-  const session = await sessionManager.create({
+  const { thread, session } = await createSessionInThread({
+    interaction,
+    sessionManager,
     projectPath,
-    threadId: thread.id,
-    userId: interaction.user.id,
-    agent: mode,
+    projectName,
+    mode,
   });
-
-  const streamHandler = new StreamHandler(thread, session);
-  streamHandler.start();
-
-  // Mensagem inicial na thread
-  await thread.send(buildSessionEmbed({ mode, projectName, projectPath, session }));
 
   // Se passou um prompt inicial, envia diretamente
   if (promptText) {
@@ -378,6 +387,35 @@ async function handleCommandoAutocomplete(interaction, focusedValue) {
 }
 
 /**
+ * Envia o output completo da sessão como arquivo .txt
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handleHistory(interaction, sessionManager) {
+  const session = sessionManager.getByThread(interaction.channelId);
+
+  if (!session) {
+    return interaction.reply({
+      content: '❌ Nenhuma sessão associada a esta thread.',
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  const output = session.outputBuffer || '(sem output)';
+  const buffer = Buffer.from(output, 'utf-8');
+  const attachment = new AttachmentBuilder(buffer, {
+    name: `session-${session.sessionId.slice(-8)}.txt`,
+    description: 'Output completo da sessão OpenCode',
+  });
+
+  await interaction.reply({
+    content: `📄 Output da sessão (${Math.round(buffer.length / 1024)} KB):`,
+    files: [attachment],
+    flags: MessageFlags.Ephemeral,
+  });
+}
+
+/**
  * Executa um comando opencode personalizado na sessão atual da thread.
  * @param {import('discord.js').ChatInputCommandInteraction} interaction
  * @param {import('./session-manager.js').SessionManager} sessionManager
@@ -423,10 +461,9 @@ export async function handleInteraction(interaction, sessionManager) {
     await interaction.deferUpdate();
 
     // Valida e sanitiza o caminho do projeto (prevenção de path traversal)
-    const resolvedBase = path.resolve(PROJECTS_BASE);
-    const projectPath = path.resolve(PROJECTS_BASE, projectName);
-    if (!projectPath.startsWith(resolvedBase + path.sep) && projectPath !== resolvedBase) {
-      return interaction.editReply({ content: '❌ Caminho de projeto inválido.', components: [] });
+    const { valid, projectPath, error } = validateProjectPath(projectName);
+    if (!valid) {
+      return interaction.editReply({ content: error, components: [] });
     }
     if (!existsSync(projectPath)) {
       return interaction.editReply({
@@ -444,24 +481,13 @@ export async function handleInteraction(interaction, sessionManager) {
       });
     }
 
-    const threadName = `${mode === 'plan' ? '📋 Plan' : '🔨 Build'} · ${projectName} · ${formatTime()}`;
-    const channel = interaction.channel ?? await interaction.client.channels.fetch(interaction.channelId);
-    const thread = await channel.threads.create({
-      name: threadName,
-      autoArchiveDuration: 1440,
-    });
-
-    const session = await sessionManager.create({
+    const { thread } = await createSessionInThread({
+      interaction,
+      sessionManager,
       projectPath,
-      threadId: thread.id,
-      userId: interaction.user.id,
-      agent: mode,
+      projectName,
+      mode,
     });
-
-    const streamHandler = new StreamHandler(thread, session);
-    streamHandler.start();
-
-    await thread.send(buildSessionEmbed({ mode, projectName, projectPath, session }));
 
     await interaction.editReply({
       content: `✅ Sessão **${mode}** iniciada para \`${projectName}\`!\n👉 ${thread}`,
@@ -472,6 +498,11 @@ export async function handleInteraction(interaction, sessionManager) {
   // Botão confirmar stop
   if (interaction.customId.startsWith('confirm_stop_')) {
     const sessionId = interaction.customId.replace('confirm_stop_', '');
+    const targetSession = sessionManager.getById(sessionId);
+    const allowShared = process.env.ALLOW_SHARED_SESSIONS === 'true';
+    if (targetSession && !allowShared && targetSession.userId !== interaction.user.id) {
+      return interaction.update({ content: '🚫 Apenas o criador da sessão pode encerrá-la.', components: [] });
+    }
     await sessionManager.destroy(sessionId);
     await interaction.update({ content: '✅ Sessão encerrada.', components: [] });
   }
@@ -485,6 +516,40 @@ export async function handleInteraction(interaction, sessionManager) {
 // ─── Utilitários ──────────────────────────────────────────────────────────────
 
 /**
+ * Cria uma thread Discord e inicia uma sessão OpenCode nela.
+ * @param {object} opts
+ * @param {import('discord.js').ChatInputCommandInteraction | import('discord.js').StringSelectMenuInteraction} opts.interaction
+ * @param {import('./session-manager.js').SessionManager} opts.sessionManager
+ * @param {string} opts.projectPath
+ * @param {string} opts.projectName
+ * @param {'plan'|'build'} opts.mode
+ * @returns {Promise<{ thread: import('discord.js').ThreadChannel, session: import('./session-manager.js').OpenCodeSession }>}
+ */
+async function createSessionInThread({ interaction, sessionManager, projectPath, projectName, mode }) {
+  const threadName = `${mode === 'plan' ? '📋 Plan' : '🔨 Build'} · ${projectName} · ${formatTime()}`;
+  const channel = interaction.channel ?? await interaction.client.channels.fetch(interaction.channelId);
+  const thread = await channel.threads.create({
+    name: threadName,
+    autoArchiveDuration: 1440,
+    reason: `Sessão OpenCode ${mode} para ${projectName}`,
+  });
+
+  const session = await sessionManager.create({
+    projectPath,
+    threadId: thread.id,
+    userId: interaction.user.id,
+    agent: mode,
+  });
+
+  const streamHandler = new StreamHandler(thread, session);
+  streamHandler.start();
+
+  await thread.send(buildSessionEmbed({ mode, projectName, projectPath, session }));
+
+  return { thread, session };
+}
+
+/**
  * Lista os projetos disponíveis no diretório base
  * @returns {string[]}
  */
@@ -494,7 +559,8 @@ function getProjects() {
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
       .sort();
-  } catch {
+  } catch (err) {
+    debug('commands', '⚠️ Erro ao listar projetos em %s: %s', PROJECTS_BASE, err.message);
     return [];
   }
 }

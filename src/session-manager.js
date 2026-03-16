@@ -8,11 +8,10 @@ import { randomUUID } from 'crypto';
 import { basename } from 'path';
 import { stripAnsi, debug } from './utils.js';
 import { ServerManager } from './server-manager.js';
+import { SESSION_TIMEOUT_MS, MAX_BUFFER } from './config.js';
 
-// ─── Configuração ─────────────────────────────────────────────────────────────
-
-/** Limite máximo do buffer de output (500 KB) */
-const MAX_BUFFER = 512_000;
+/** Intervalo de verificação de timeout (1 min) */
+const TIMEOUT_CHECK_INTERVAL = 60_000;
 
 // ─── OpenCodeSession ──────────────────────────────────────────────────────────
 
@@ -42,6 +41,7 @@ class OpenCodeSession extends EventEmitter {
     this.outputBuffer = '';
     this.pendingOutput = '';
     this.createdAt = new Date();
+    this.lastActivityAt = new Date();
     this.closedAt = null;
   }
 
@@ -85,6 +85,7 @@ class OpenCodeSession extends EventEmitter {
     }
 
     this.status = 'running';
+    this.lastActivityAt = new Date();
     this.emit('status', 'running');
 
     await this.server.client.sendMessage(this.apiSessionId, this.agent, text);
@@ -142,6 +143,7 @@ class OpenCodeSession extends EventEmitter {
         const clean = stripAnsi(delta);
         this.outputBuffer += clean;
         this.pendingOutput += clean;
+        this.lastActivityAt = new Date();
 
         if (this.outputBuffer.length > MAX_BUFFER) {
           this.outputBuffer = this.outputBuffer.slice(-MAX_BUFFER);
@@ -230,6 +232,23 @@ class OpenCodeSession extends EventEmitter {
         break;
       }
 
+      case 'session.diff': {
+        // Diff de alterações em arquivos feitas pelo agente
+        const diffs = props.diffs ?? props.diff ?? event.data?.diffs ?? [];
+        const diffList = Array.isArray(diffs) ? diffs : [diffs];
+
+        for (const diff of diffList) {
+          if (!diff) continue;
+          const filePath = diff.path ?? diff.file ?? diff.filename ?? 'arquivo desconhecido';
+          const content = diff.content ?? diff.patch ?? diff.diff ?? '';
+          if (content) {
+            this.lastActivityAt = new Date();
+            this.emit('diff', { path: filePath, content });
+          }
+        }
+        break;
+      }
+
       default:
         // Ignorar tipos não tratados silenciosamente
         break;
@@ -243,6 +262,7 @@ class OpenCodeSession extends EventEmitter {
   flushPending() {
     const out = this.pendingOutput;
     this.pendingOutput = '';
+    if (out) this.lastActivityAt = new Date();
     return out;
   }
 
@@ -262,7 +282,7 @@ class OpenCodeSession extends EventEmitter {
       createdAt: this.createdAt,
       closedAt: this.closedAt,
       project: basename(this.projectPath),
-      lastActivityAt: this.closedAt ?? this.createdAt,
+      lastActivityAt: this.closedAt ?? this.lastActivityAt,
     };
   }
 }
@@ -282,6 +302,11 @@ class SessionManager {
     this._sessions = new Map();
     /** @type {Map<string, string>} */
     this._threadIndex = new Map();
+
+    // Verificação periódica de sessões expiradas
+    if (SESSION_TIMEOUT_MS > 0) {
+      this._timeoutTimer = setInterval(() => this._checkTimeouts(), TIMEOUT_CHECK_INTERVAL);
+    }
   }
 
   /**
@@ -360,6 +385,25 @@ class SessionManager {
    */
   getAll() {
     return [...this._sessions.values()];
+  }
+
+  /**
+   * Verifica e encerra sessões que excederam o tempo de inatividade.
+   * @private
+   */
+  _checkTimeouts() {
+    const now = Date.now();
+    for (const session of this._sessions.values()) {
+      if (session.status === 'finished' || session.status === 'error') continue;
+      const inactiveMs = now - session.lastActivityAt.getTime();
+      if (inactiveMs > SESSION_TIMEOUT_MS) {
+        console.log('[SessionManager] ⏰ Sessão expirada por inatividade: %s (%dmin)', session.sessionId, Math.round(inactiveMs / 60_000));
+        session.emit('timeout');
+        session.close();
+        this._sessions.delete(session.sessionId);
+        this._threadIndex.delete(session.threadId);
+      }
+    }
   }
 
   /**
