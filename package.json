@@ -16,7 +16,7 @@
     "dotenv": "^16.4.5"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "overrides": {
     "undici": "^6.24.1"

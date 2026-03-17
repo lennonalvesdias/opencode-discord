@@ -142,7 +142,7 @@ Cobertura de testes: utils, SSE parser, config/path validation, rate limiter, st
 
 ### CI/CD
 
-O projeto usa GitHub Actions para CI automático (Node 18/20/22) em push para `main` e PRs.
+O projeto usa GitHub Actions para CI automático (Node 20/22) em push para `main` e PRs.
 
 ---
 

@@ -7,7 +7,7 @@ Coding guidelines for AI agents and contributors working in this repository.
 ## Project Overview
 
 A Discord bot that bridges Discord threads to local `opencode` CLI processes on Windows.
-Built with **plain JavaScript (ES Modules)**, targeting **Node.js ≥ 18.0.0**. No build step,
+Built with **plain JavaScript (ES Modules)**, targeting **Node.js ≥ 20.0.0**. No build step,
 no compilation — the source in `src/` runs directly.
 
 **Key files:**

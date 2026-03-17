@@ -16,6 +16,10 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.
   - Diffs grandes: enviados como arquivo `.diff` anexo
   - Suporte a múltiplos diffs por evento
 
+### Alterado
+
+- **Node.js mínimo atualizado para 20.0.0** — Node 18 atingiu EOL em abril/2025; Vitest 4.x (Rolldown) requer `styleText` de `node:util`, disponível apenas a partir do Node 20.12.0
+
 ---
 
 ## [1.1.0] - 2026-03-16
