@@ -3,6 +3,10 @@
 
 import stripAnsiLib from 'strip-ansi';
 
+// Caracteres de controle a remover (exceto \n \r \t)
+// [\x00-\x08]: NUL–BS  [\x0B-\x0C]: VT, FF  [\x0E-\x1F]: SO–US  [\x7F]: DEL
+const CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
 /**
  * Formata uma data como tempo relativo legível
  * @param {Date|string} date
@@ -26,7 +30,7 @@ export function formatAge(date) {
  */
 export function stripAnsi(str) {
   if (!str) return '';
-  return stripAnsiLib(str);
+  return stripAnsiLib(str).replace(CONTROL_CHARS_RE, '');
 }
 
 // ─── Debug logging ────────────────────────────────────────────────────────────
