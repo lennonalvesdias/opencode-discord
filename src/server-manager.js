@@ -17,6 +17,9 @@ import {
   SERVER_CIRCUIT_BREAKER_COOLDOWN_MS,
 } from './config.js';
 
+/** Número máximo de portas a varrer antes de lançar erro */
+const PORT_SCAN_MAX_RANGE = 200;
+
 /**
  * Tipos SSE que nunca carregam sessionID em properties.sessionID
  * ou que nunca são tratados por handleSSEEvent — suprimir do log de diagnóstico
@@ -369,6 +372,19 @@ class OpenCodeServer extends EventEmitter {
   awaitReady() {
     return this._readyPromise;
   }
+
+  /**
+   * Retorna informações públicas de saúde deste servidor.
+   * Substitui o acesso direto a campos privados por convenção (ex: _circuitBreakerUntil).
+   * @returns {{ port: number, status: string, circuitBreakerUntil: number }}
+   */
+  toHealthInfo() {
+    return {
+      port: this.port,
+      status: this.status,
+      circuitBreakerUntil: this._circuitBreakerUntil ?? 0,
+    };
+  }
 }
 
 // ─── ServerManager ────────────────────────────────────────────────────────────
@@ -435,8 +451,13 @@ class ServerManager {
    */
   async _doAllocatePort() {
     let port = this._nextPort;
+    let attempts = 0;
     while (this._usedPorts.has(port) || !(await isPortAvailable(port))) {
       port++;
+      attempts++;
+      if (attempts >= PORT_SCAN_MAX_RANGE) {
+        throw new Error('[ServerManager] ❌ Não foi possível alocar porta no intervalo disponível');
+      }
     }
     this._usedPorts.add(port);
     this._nextPort = port + 1;
@@ -515,6 +536,14 @@ class ServerManager {
    */
   getServer(projectPath) {
     return this._servers.get(projectPath) ?? null;
+  }
+
+  /**
+   * Retorna todos os servidores gerenciados.
+   * @returns {OpenCodeServer[]}
+   */
+  getAll() {
+    return [...this._servers.values()];
   }
 }
 

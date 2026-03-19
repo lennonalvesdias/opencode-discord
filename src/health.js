@@ -17,16 +17,27 @@ export function startHealthServer({ sessionManager, serverManager, startedAt }) 
       const sessions = sessionManager.getAll();
       const activeSessions = sessions.filter((s) => s.status !== 'finished' && s.status !== 'error');
 
+      const allServers = serverManager.getAll();
+      const servers = allServers.map((srv) => srv.toHealthInfo());
+
+      // Degrada se mais de 50% dos servidores estão em estado de erro
+      const errorCount = allServers.filter((srv) => srv.status === 'error').length;
+      const isDegraded = allServers.length > 0 && errorCount / allServers.length > 0.5;
+
+      const statusCode = isDegraded ? 503 : 200;
+      const statusText = isDegraded ? 'degraded' : 'ok';
+
       const body = JSON.stringify({
-        status: 'ok',
+        status: statusText,
         uptime: Math.floor((Date.now() - startedAt) / 1000),
         sessions: {
           total: sessions.length,
           active: activeSessions.length,
         },
+        servers,
       });
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
       res.end(body);
     } else {
       res.writeHead(404);

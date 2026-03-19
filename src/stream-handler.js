@@ -30,6 +30,8 @@ export class StreamHandler {
     // Fila de eventos de status para evitar chamadas concorrentes à API Discord
     this._statusQueue = [];
     this._processingStatus = false;
+    // Timer de arquivamento da thread após fechar sessão
+    this._archiveTimer = null;
     // Flag para saber se já houve output (evita "Processando" redundante)
     this.hasOutput = false;
   }
@@ -67,7 +69,8 @@ export class StreamHandler {
       await this.flush();
       this.stop();
       // Arquiva a thread após THREAD_ARCHIVE_DELAY_MS para dar tempo de ler a mensagem final
-      setTimeout(async () => {
+      this._archiveTimer = setTimeout(async () => {
+        this._archiveTimer = null;
         try {
           await this.thread.setArchived(true);
         } catch (err) {
@@ -339,6 +342,10 @@ export class StreamHandler {
     if (this.updateTimer) {
       clearTimeout(this.updateTimer);
       this.updateTimer = null;
+    }
+    if (this._archiveTimer) {
+      clearTimeout(this._archiveTimer);
+      this._archiveTimer = null;
     }
   }
 }

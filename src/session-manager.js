@@ -209,39 +209,14 @@ class OpenCodeSession extends EventEmitter {
       case 'session.status': {
         const statusType = props.status?.type;
         if (statusType === 'idle') {
-          if (this.status === 'running') {
-            // Agente concluiu — verifica se está aguardando input
-            if (isWaitingForInput(this._recentOutput)) {
-              this.status = 'waiting_input';
-              this.emit('status', 'waiting_input');
-            } else {
-              this.status = 'idle';
-              this.emit('status', 'finished');
-            }
-          } else if (this.status === 'waiting_input') {
-            // Servidor sinalizou idle novamente — sessão realmente concluída
-            this.status = 'idle';
-            this.emit('status', 'finished');
-          }
+          this._handleIdleTransition();
         }
         break;
       }
 
       case 'session.idle': {
         // Evento alternativo de conclusão
-        if (this.status === 'running') {
-          if (isWaitingForInput(this._recentOutput)) {
-            this.status = 'waiting_input';
-            this.emit('status', 'waiting_input');
-          } else {
-            this.status = 'idle';
-            this.emit('status', 'finished');
-          }
-        } else if (this.status === 'waiting_input') {
-          // Servidor sinalizou idle novamente — sessão realmente concluída
-          this.status = 'idle';
-          this.emit('status', 'finished');
-        }
+        this._handleIdleTransition();
         break;
       }
 
@@ -357,6 +332,28 @@ class OpenCodeSession extends EventEmitter {
   }
 
   /**
+   * Centraliza a lógica de transição de estado ao receber sinal idle do servidor.
+   * Determina se a sessão deve ir para `waiting_input` ou `finished`.
+   * @private
+   */
+  _handleIdleTransition() {
+    if (this.status === 'running') {
+      // Agente concluiu — verifica se está aguardando input
+      if (isWaitingForInput(this._recentOutput)) {
+        this.status = 'waiting_input';
+        this.emit('status', 'waiting_input');
+      } else {
+        this.status = 'idle';
+        this.emit('status', 'finished');
+      }
+    } else if (this.status === 'waiting_input') {
+      // Servidor sinalizou idle novamente — sessão realmente concluída
+      this.status = 'idle';
+      this.emit('status', 'finished');
+    }
+  }
+
+  /**
    * Consome e limpa o buffer de output pendente.
    * @returns {string}
    */
@@ -406,7 +403,11 @@ class SessionManager {
 
     // Verificação periódica de sessões expiradas
     if (SESSION_TIMEOUT_MS > 0) {
-      this._timeoutTimer = setInterval(() => this._checkTimeouts(), TIMEOUT_CHECK_INTERVAL);
+      this._timeoutTimer = setInterval(() => {
+        this._checkTimeouts().catch((err) => {
+          console.error('[SessionManager] ⚠️ Erro em _checkTimeouts:', err.message);
+        });
+      }, TIMEOUT_CHECK_INTERVAL);
     }
   }
 
@@ -494,8 +495,10 @@ class SessionManager {
    * Verifica e encerra sessões que excederam o tempo de inatividade.
    * @private
    */
-  _checkTimeouts() {
+  async _checkTimeouts() {
     const now = Date.now();
+    const toExpire = [];
+
     for (const session of this._sessions.values()) {
       if (session.status === 'finished' || session.status === 'error') continue;
       // Para sessões aguardando input do usuário, usar timeout duplo
@@ -503,12 +506,30 @@ class SessionManager {
       const inactiveMs = now - session.lastActivityAt.getTime();
       if (inactiveMs > effectiveTimeout) {
         console.log('[SessionManager] ⏰ Sessão expirada por inatividade: %s (%dmin)', session.sessionId, Math.round(inactiveMs / 60_000));
-        session.emit('timeout');
-        session.close();
-        this._sessions.delete(session.sessionId);
-        this._threadIndex.delete(session.threadId);
+        toExpire.push(session);
       }
     }
+
+    for (const session of toExpire) {
+      session.emit('timeout');
+      await this._expireSession(session);
+    }
+  }
+
+  /**
+   * Encerra uma sessão expirada por timeout e remove dos índices internos.
+   * Garante que o close() seja aguardado antes da remoção.
+   * @param {OpenCodeSession} session
+   * @private
+   */
+  async _expireSession(session) {
+    await session.close().catch((err) => {
+      console.error('[SessionManager] ⚠️ Erro ao encerrar sessão expirada %s:', session.sessionId, err.message);
+    });
+    // Deleções abaixo são intencionalmente redundantes com o listener 'close' registrado em create().
+    // São no-ops seguros caso o listener já tenha executado primeiro.
+    this._sessions.delete(session.sessionId);
+    this._threadIndex.delete(session.threadId);
   }
 
   /**
@@ -521,6 +542,8 @@ class SessionManager {
 
     await session.close();
 
+    // Deleções abaixo são intencionalmente redundantes com o listener 'close' registrado em create().
+    // São no-ops seguros caso o listener já tenha executado primeiro.
     this._sessions.delete(sessionId);
     this._threadIndex.delete(session.threadId);
 

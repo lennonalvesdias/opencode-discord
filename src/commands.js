@@ -11,7 +11,8 @@ import {
   MessageFlags,
   AttachmentBuilder,
 } from 'discord.js';
-import { readdirSync, existsSync } from 'fs';
+import { existsSync } from 'fs';
+import { readdir } from 'fs/promises';
 import path from 'path';
 import { StreamHandler } from './stream-handler.js';
 import { formatAge, debug } from './utils.js';
@@ -22,6 +23,17 @@ import { RateLimiter } from './rate-limiter.js';
 const commandRateLimiter = new RateLimiter({ maxActions: 5, windowMs: 60_000 });
 
 const STATUS_EMOJI = { running: '⚙️', waiting_input: '💬', finished: '✅', error: '❌', idle: '💤' };
+
+// ─── Cache de projetos ────────────────────────────────────────────────────────
+
+/** Cache em memória da lista de projetos */
+let _projectsCache = null;
+/** Timestamp da última leitura do filesystem */
+let _projectsCacheTime = 0;
+/** Promise em andamento para evitar leituras paralelas (cache stampede) */
+let _projectsPending = null;
+/** TTL do cache em milissegundos */
+const PROJECTS_CACHE_TTL_MS = 60_000;
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -182,7 +194,7 @@ export async function handleAutocomplete(interaction) {
 
   // Autocomplete de projeto para /plan e /build
   const focused = interaction.options.getFocused().toLowerCase();
-  const projects = getProjects();
+  const projects = await getProjects();
   const filtered = projects
     .filter((p) => p.toLowerCase().includes(focused))
     .slice(0, 25)
@@ -214,7 +226,7 @@ async function handleStartSession(interaction, sessionManager, mode) {
 
   // Se não passou projeto, mostra selector
   if (!projectName) {
-    const projects = getProjects();
+    const projects = await getProjects();
     if (projects.length === 0) {
       return interaction.editReply(
         `❌ Nenhum projeto encontrado em \`${PROJECTS_BASE}\`. Configure \`PROJECTS_BASE_PATH\` no .env.`
@@ -385,7 +397,7 @@ async function handleStop(interaction, sessionManager) {
  * @param {import('discord.js').ChatInputCommandInteraction} interaction
  */
 async function handleListProjects(interaction) {
-  const projects = getProjects();
+  const projects = await getProjects();
 
   if (projects.length === 0) {
     return interaction.reply({
@@ -560,35 +572,66 @@ async function createSessionInThread({ interaction, sessionManager, projectPath,
     reason: `Sessão OpenCode ${mode} para ${projectName}`,
   });
 
-  const session = await sessionManager.create({
-    projectPath,
-    threadId: thread.id,
-    userId: interaction.user.id,
-    agent: mode,
-  });
+  let session;
+  try {
+    session = await sessionManager.create({
+      projectPath,
+      threadId: thread.id,
+      userId: interaction.user.id,
+      agent: mode,
+    });
 
-  const streamHandler = new StreamHandler(thread, session);
-  streamHandler.start();
+    const streamHandler = new StreamHandler(thread, session);
+    streamHandler.start();
 
-  await thread.send(buildSessionEmbed({ mode, projectName, projectPath, session }));
+    await thread.send(buildSessionEmbed({ mode, projectName, projectPath, session }));
+  } catch (err) {
+    // Se a sessão já foi criada antes do erro (ex: thread.send falhou), destrói para não ficar órfã
+    if (session) {
+      await sessionManager.destroy(session.sessionId).catch((e) =>
+        console.error('[commands] ⚠️ Erro ao destruir sessão órfã:', e.message)
+      );
+    }
+    // Limpa a thread órfã para não deixar lixo no Discord
+    try {
+      await thread.delete();
+    } catch (deleteErr) {
+      console.error('[commands] ⚠️ Erro ao deletar thread órfã:', deleteErr.message);
+    }
+    throw err;
+  }
 
   return { thread, session };
 }
 
 /**
- * Lista os projetos disponíveis no diretório base
- * @returns {string[]}
+ * Lista os projetos disponíveis no diretório base.
+ * Usa cache em memória com TTL de 60 s para evitar leituras repetidas do filesystem.
+ * Deduplica chamadas simultâneas quando o cache está expirado (evita cache stampede).
+ * @returns {Promise<string[]>}
  */
-function getProjects() {
-  try {
-    return readdirSync(PROJECTS_BASE, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-      .sort();
-  } catch (err) {
-    debug('commands', '⚠️ Erro ao listar projetos em %s: %s', PROJECTS_BASE, err.message);
-    return [];
+async function getProjects() {
+  if (_projectsCache && Date.now() - _projectsCacheTime < PROJECTS_CACHE_TTL_MS) {
+    return _projectsCache;
   }
+  if (_projectsPending) return _projectsPending;
+  _projectsPending = (async () => {
+    try {
+      const entries = await readdir(PROJECTS_BASE, { withFileTypes: true });
+      _projectsCache = entries
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+        .sort();
+      _projectsCacheTime = Date.now();
+      return _projectsCache;
+    } catch (err) {
+      debug('commands', '⚠️ Erro ao listar projetos em %s: %s', PROJECTS_BASE, err.message);
+      return _projectsCache ?? [];
+    } finally {
+      _projectsPending = null;
+    }
+  })();
+  return _projectsPending;
 }
 
 /**
