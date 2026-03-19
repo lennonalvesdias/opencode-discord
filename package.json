@@ -10,7 +10,8 @@
     "dev": "node --watch src/index.js",
     "test": "vitest",
     "test:ci": "vitest run",
-    "install-service": "powershell -ExecutionPolicy Bypass -File scripts/install-service.ps1"
+    "install-service": "powershell -ExecutionPolicy Bypass -File scripts/install-service.ps1",
+    "kill-port": "powershell -ExecutionPolicy Bypass -File scripts/kill-port.ps1"
   },
   "dependencies": {
     "discord.js": "^14.18.0",
