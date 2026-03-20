@@ -220,7 +220,7 @@ export class StreamHandler {
   async flush() {
     if (!this.currentContent.trim()) return;
 
-    const content = this.currentContent;
+    const content = convertMarkdownTables(this.currentContent);
     this.currentContent = '';
 
     // Divide em chunks respeitando o limite Discord
@@ -451,6 +451,112 @@ export class StreamHandler {
 // ─── Utilitários de formatação ────────────────────────────────────────────────
 
 /**
+ * Remove formatação Markdown inline (bold, italic, code) para cálculo de largura de coluna.
+ * @param {string} text
+ * @returns {string}
+ */
+function stripInlineMarkdown(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1');
+}
+
+/**
+ * Retorna true se a linha parece ser uma linha de tabela Markdown (começa e termina com |).
+ * @param {string} line
+ * @returns {boolean}
+ */
+function isTableRow(line) {
+  const t = line.trim();
+  return t.startsWith('|') && t.endsWith('|') && t.length > 2;
+}
+
+/**
+ * Retorna true se a linha é a linha separadora de tabela Markdown (ex: |---|---|).
+ * @param {string} line
+ * @returns {boolean}
+ */
+function isSeparatorRow(line) {
+  const t = line.trim();
+  return /^\|[\s\-:|]+\|$/.test(t) && /^[\|:\-\s]+$/.test(t);
+}
+
+/**
+ * Formata um array de linhas de tabela Markdown como bloco de código monospace alinhado.
+ * A primeira linha é tratada como cabeçalho; o restante como dados.
+ * @param {string[]} rows - Linhas da tabela (sem a linha separadora)
+ * @returns {string}
+ */
+function formatTableAsCode(rows) {
+  // Parse cells de cada linha
+  const parsed = rows.map((row) =>
+    row
+      .trim()
+      .slice(1, -1)
+      .split('|')
+      .map((cell) => cell.trim())
+  );
+
+  // Normaliza número de colunas
+  const colCount = Math.max(...parsed.map((r) => r.length));
+  const normalized = parsed.map((row) => {
+    while (row.length < colCount) row.push('');
+    return row;
+  });
+
+  // Calcula largura máxima de cada coluna (sem formatação Markdown)
+  const widths = Array.from({ length: colCount }, (_, ci) =>
+    Math.max(...normalized.map((row) => stripInlineMarkdown(row[ci]).length))
+  );
+
+  // Linha separadora com caracteres Unicode box-drawing
+  const sep = widths.map((w) => '─'.repeat(w)).join('  ');
+
+  // Formata cada linha: strip inline markdown para alinhamento correto
+  const formatted = normalized.map((row) =>
+    row.map((cell, ci) => stripInlineMarkdown(cell).padEnd(widths[ci])).join('  ')
+  );
+
+  // Cabeçalho + separador + dados
+  return `\`\`\`\n${formatted[0]}\n${sep}\n${formatted.slice(1).join('\n')}\n\`\`\``;
+}
+
+/**
+ * Detecta tabelas Markdown no texto e as converte para blocos de código monospace alinhados.
+ * Discord não renderiza tabelas GFM — este passo garante legibilidade.
+ * @param {string} text
+ * @returns {string}
+ */
+function convertMarkdownTables(text) {
+  const lines = text.split('\n');
+  const result = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    // Detecta tabela: linha de dados + linha separadora logo abaixo
+    if (isTableRow(lines[i]) && i + 1 < lines.length && isSeparatorRow(lines[i + 1])) {
+      const tableRows = [lines[i]]; // cabeçalho
+      i += 2; // pula cabeçalho e separador
+
+      // Coleta linhas de dados da tabela
+      while (i < lines.length && isTableRow(lines[i])) {
+        tableRows.push(lines[i]);
+        i++;
+      }
+
+      result.push(formatTableAsCode(tableRows));
+    } else {
+      result.push(lines[i]);
+      i++;
+    }
+  }
+
+  return result.join('\n');
+}
+
+/**
  * Divide texto longo em pedaços respeitando o limite do Discord
  * @param {string} text
  * @param {number} limit
@@ -511,4 +617,4 @@ function getDiffLanguage(ext) {
  * Funções internas expostas exclusivamente para cobertura de testes.
  * Não fazem parte da API pública do módulo.
  */
-export const _internal = { splitIntoChunks, mergeContent };
+export const _internal = { splitIntoChunks, mergeContent, convertMarkdownTables };

@@ -295,7 +295,15 @@ async function handleStartSession(interaction, sessionManager, mode) {
     return await replyError(interaction, 'Mensagem muito longa (máximo 10.000 caracteres).');
   }
 
-  await interaction.deferReply();
+  try {
+    await interaction.deferReply();
+  } catch (err) {
+    if (err.code === 10062) {
+      console.warn(`[commands] ⏰ Token de interação expirado ao deferir (${interaction.commandName}): ${interaction.id}`);
+      return;
+    }
+    throw err; // re-lança erros inesperados
+  }
 
   // Se não passou projeto, mostra selector
   if (!projectName) {
@@ -475,7 +483,15 @@ async function handleStop(interaction, sessionManager) {
  * @param {import('discord.js').ChatInputCommandInteraction} interaction
  */
 async function handleListProjects(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    if (err.code === 10062) {
+      console.warn(`[commands] ⏰ Token de interação expirado ao deferir (${interaction.commandName}): ${interaction.id}`);
+      return;
+    }
+    throw err; // re-lança erros inesperados
+  }
 
   const projects = await getProjects();
 
@@ -561,7 +577,15 @@ async function handleRunCommand(interaction, sessionManager) {
   // Monta a string do comando e envia para a sessão
   const commandText = args.trim() ? `/${commandName} ${args.trim()}` : `/${commandName}`;
 
-  await interaction.deferReply();
+  try {
+    await interaction.deferReply();
+  } catch (err) {
+    if (err.code === 10062) {
+      console.warn(`[commands] ⏰ Token de interação expirado ao deferir (${interaction.commandName}): ${interaction.id}`);
+      return;
+    }
+    throw err; // re-lança erros inesperados
+  }
   await session.sendMessage(commandText);
   await interaction.editReply(`⚙️ Comando \`${commandText}\` enviado para a sessão.`);
 }
@@ -580,7 +604,15 @@ async function handleDiffCommand(interaction, sessionManager) {
 
   await audit('command.diff', { project: path.basename(session.projectPath) }, interaction.user.id, session.sessionId);
 
-  await interaction.deferReply();
+  try {
+    await interaction.deferReply();
+  } catch (err) {
+    if (err.code === 10062) {
+      console.warn(`[commands] ⏰ Token de interação expirado ao deferir (${interaction.commandName}): ${interaction.id}`);
+      return;
+    }
+    throw err; // re-lança erros inesperados
+  }
 
   let diffOutput = '';
 

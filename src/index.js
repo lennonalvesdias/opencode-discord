@@ -120,6 +120,8 @@ client.on('interactionCreate', async (interaction) => {
     console.error('[interactionCreate] Erro:', err);
     // Interações de autocomplete não suportam reply/followUp — nada a fazer
     if (interaction.isAutocomplete()) return;
+    // 10062 = token expirado; nenhuma resposta é possível
+    if (err.code === 10062) return;
     const reply = { content: '❌ Ocorreu um erro interno. Por favor, tente novamente.', flags: MessageFlags.Ephemeral };
     try {
       if (interaction.replied || interaction.deferred) {
