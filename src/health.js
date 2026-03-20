@@ -21,7 +21,7 @@ export function startHealthServer({ sessionManager, serverManager, startedAt }) 
       const servers = allServers.map((srv) => srv.toHealthInfo());
 
       // Degrada se mais de 50% dos servidores estão em estado de erro
-      const errorCount = allServers.filter((srv) => srv.status === 'error').length;
+      const errorCount = allServers.filter((srv) => srv.toHealthInfo().status === 'error').length;
       const isDegraded = allServers.length > 0 && errorCount / allServers.length > 0.5;
 
       const statusCode = isDegraded ? 503 : 200;

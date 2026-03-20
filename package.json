@@ -25,6 +25,7 @@
     "undici": "^6.24.1"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.0",
     "vitest": "^4.1.0"
   }
 }

@@ -24,6 +24,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Windows shell artifacts
+nul
+
 # Editor
 .vscode/
 .idea/

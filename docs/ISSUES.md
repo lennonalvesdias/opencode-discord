@@ -3,7 +3,7 @@
 > **Documento vivo** — atualizar conforme issues forem resolvidas, novas forem identificadas ou evoluções forem implementadas.
 
 **Data de criação:** 2026-03-17
-**Última atualização:** 2026-03-19
+**Última atualização:** 2026-03-20
 **Descrição:** Registro centralizado de bugs, code smells, cobertura de testes e ideias de evolução para o projeto `opencode-discord`. Serve como backlog técnico e guia de qualidade para o desenvolvimento contínuo.
 
 ---
@@ -51,33 +51,33 @@
 
 ### Status Atual por Módulo
 
-| Módulo | Linhas | Cobertura | Status |
-|---|---|---|---|
-| `index.js` | 207 | 0% | ❌ Sem testes |
-| `commands.js` | 606 | 0% | ❌ Sem testes |
-| `session-manager.js` | 495 | ~2% | ⚠️ Mínima |
-| `stream-handler.js` | 380 | ~5% | ⚠️ Mínima |
-| `server-manager.js` | 400 | 0% | ❌ Sem testes |
-| `opencode-client.js` | 144 | 0% | ❌ Sem testes |
-| `opencode-commands.js` | 87 | 0% | ❌ Sem testes |
-| `config.js` | 71 | ~15% | ⚠️ Mínima |
-| `utils.js` | 55 | ~40% | ⚠️ Parcial |
-| `rate-limiter.js` | 49 | ~20% | ⚠️ Mínima |
-| `sse-parser.js` | 92 | ~15% | ⚠️ Mínima |
-| `health.js` | 46 | 0% | ❌ Sem testes |
+| Módulo | % Stmts | % Branch | % Funcs | % Lines | Status |
+|---|---|---|---|---|---|
+| `index.js` | — | — | — | — | ⚙️ excluído do coverage |
+| `commands.js` | 87% | 74.01% | 89.18% | 87.3% | ✅ Meta atingida |
+| `config.js` | 100% | 100% | 100% | 100% | ✅ Meta atingida |
+| `health.js` | 95.65% | 100% | 85.71% | 95% | ✅ Meta atingida |
+| `opencode-client.js` | 86.11% | 82.35% | 87.5% | 86.11% | ✅ Meta atingida |
+| `opencode-commands.js` | 96.66% | 93.75% | 100% | 96% | ✅ Meta atingida |
+| `rate-limiter.js` | 100% | 100% | 100% | 100% | ✅ Meta atingida |
+| `server-manager.js` | 81.4% | 68.35% | 78.57% | 83.51% | ✅ Meta atingida |
+| `session-manager.js` | 87.08% | 68.14% | 81.25% | 87.37% | ✅ Meta atingida |
+| `sse-parser.js` | 81.81% | 75% | 100% | 87.5% | ✅ Meta atingida |
+| `stream-handler.js` | 80.95% | 68.49% | 74.19% | 81.76% | ✅ Meta atingida |
+| `utils.js` | 100% | 100% | 100% | 100% | ✅ Meta atingida |
 
-**Cobertura total estimada: ~4%** ❌
+**Cobertura total atual: 85.9% statements** ✅
 
 ---
 
 ### Meta de Cobertura por Fase
 
-| Fase | Meta Total | Prazo | Módulos Prioritários |
-|---|---|---|---|
-| Atual | ~4% | — | — |
-| v1.3 | **30%** | Q1 2026 | `utils.js`, `rate-limiter.js`, `sse-parser.js`, `config.js`, `session-manager.js` |
-| v1.4 | **50%** | Q2 2026 | + `opencode-client.js`, `commands.js`, `health.js` |
-| v2.0 | **65%** | Q3 2026 | + `server-manager.js`, `stream-handler.js`, `index.js` |
+| Fase | Meta Total | Prazo | Status | Módulos Prioritários |
+|---|---|---|---|---|
+| Atual | **85.9%** | — | ✅ | — |
+| v1.3 | **30%** | Q1 2026 | ✅ Atingido | `utils.js`, `rate-limiter.js`, `sse-parser.js`, `config.js`, `session-manager.js` |
+| v1.4 | **50%** | Q2 2026 | ✅ Atingido | + `opencode-client.js`, `commands.js`, `health.js` |
+| v2.0 | **65%** | Q3 2026 | ✅ Atingido | + `server-manager.js`, `stream-handler.js`, `index.js` |
 
 **Ordem recomendada de implementação de testes:**
 
@@ -94,121 +94,12 @@
 
 ---
 
-### Testes Sugeridos por Módulo
+### Histórico de Cobertura
 
-#### `index.js` — ❌ Sem testes
-- `deveRegistrarComandosSlashNaInicialização`
-- `deveEncerrarSessõesAtivasAoReceberSIGINT`
-- `deveEncerrarSessõesAtivasAoReceberSIGTERM`
-- `deveCapturarUncaughtExceptionSemCrash`
-- `deveCapturarUnhandledRejectionSemCrash`
-- `deveIgnorarInteraçõesDeBotsExternos`
-- `deveVerificarPermissõesDoUsuárioAntesDeExecutar`
-
-#### `commands.js` — ❌ Sem testes
-- `deveCriarSessãoComProjectPathVálido`
-- `deveRejeitarProjectPathFora do BasePath`
-- `deveRejeitarProjectPathInexistente`
-- `deveRespeitar LimiteDeSessionsPorUsuário`
-- `deveResponderEphemeralEmTodosOsErros`
-- `deveEnviarMensagemParaSessãoExistente`
-- `deveRejeitarMensagemParaSessãoFechada`
-- `deveListarProjetosDisponíveis`
-- `deveAutocompletarNomesDeProjetoCorretamente`
-- `deveLimitarPromptTextA10000Chars`
-- `deveLimitarProjectNameA256Chars`
-- `deveListarSessõesAtivasDoUsuário`
-- `deveEncerarSessãoQuandoSolicitado`
-- `deveRejeitarComandoDeUsuárioNãoPermitido`
-- `deveRetornarErroSeDiscordAPIFalharNaCriação`
-- `deveValidarOpçõesDoComandoStart`
-- `deveValidarOpçõesDoComandoSend`
-- `deveMostrarStatusDaSessãoCorretamente`
-- `deveTratarThreadJáExistenteGraciosamente`
-- `deveTratarInteraçãoJáRespondidaSemCrash`
-
-#### `session-manager.js` — ⚠️ Mínima (~2%)
-- `deveCriarSessãoComIDÚnico`
-- `deveIndexarSessãoPorThreadId`
-- `deveRemoverDoThreadIndexImediatamenteAoFechar`
-- `deveMantêrCachePor10MinutosApósFechar`
-- `deveColetarLixoAposExpiracaoDoCache`
-- `deveRespeitarLimiteDeSessoesPorUsuário`
-- `deveCancelarTimeoutsDeRetryNoClose`
-- `deveNãoCriarDuplicataParaMesmaThread`
-- `deveEmitirEventoCloseAoEncerrar`
-- `deveEmitirEventoErrorEmFalha`
-
-#### `stream-handler.js` — ⚠️ Mínima (~5%)
-- `deveFlushBufferNoIntervaloConfigurado`
-- `deveNãoExplodirComSessionNull`
-- `deveAplicarTimeoutDe5sNaStatusQueue`
-- `deveLimitarMensagemAoDiscordMsgLimit`
-- `deveStripAnsiAntesDeEnviar`
-- `deveAcumularOutputEntreFlushs`
-- `devePararFlushAoDesconectar`
-- `deveRespeitarRateLimitDoDiscord`
-
-#### `server-manager.js` — ❌ Sem testes
-- `deveInicializarServidorOpencode`
-- `deveReconectarSSEAposDesconexão`
-- `deveNãoReconectarEmAbortIntencional`
-- `deveEncaminharEventoSSEParaSessãoCorreta`
-- `deveTratarErroEmHandleSSEEventSemQuebrarStream`
-- `deveValidarOPENCODE_BINNaInicialização`
-- `deveAplicarCircuitBreakerApos3Reinícios`
-- `deveAguardarCooldownDe60sAposCircuitBreaker`
-- `deveListarServadoresAtivos`
-
-#### `opencode-client.js` — ❌ Sem testes
-- `deveEnviarRequisiçãoHTTPCorretamente`
-- `deveTratarTimeoutDeConexão`
-- `deveRetornarErroEmStatusHTTPNão2xx`
-- `deveSerializarBodyComoJSON`
-- `deveDeserializarRespostaJSON`
-- `deveTratarRespostaVazia`
-
-#### `opencode-commands.js` — ❌ Sem testes
-- `deveConstruirComandoRunCorretamente`
-- `deveConstruirComandoSendCorretamente`
-- `deveEscaparArgumentosComEspaços`
-- `deveRetornarArrayDeArgumentos`
-
-#### `config.js` — ⚠️ Mínima (~15%)
-- `deveLerVariáveisDeAmbienteCorretamente`
-- `deveUsarValoresPadrãoQuandoOptionalAusente`
-- `deveLançarErroSeVariávelObrigatóriaAusente`
-- `deveConverterSTREAM_UPDATE_INTERVALParaNumber`
-- `deveConverterDISCORD_MSG_LIMITParaNumber`
-- `deveParsearALLOWED_USER_IDSComoArray`
-
-#### `utils.js` — ⚠️ Parcial (~40%)
-- `deveStripCódigosANSISimples`
-- `deveStripSequênciasANSIComplexas`
-- `deveNãoPendurárComInputMaliciosaReDoS`
-- `deveRetornarStringVaziaParaInputVazia`
-- `deveTruncaMensagemAoLimiteInformado`
-
-#### `rate-limiter.js` — ⚠️ Mínima (~20%)
-- `devePrimeiraChamadaPassarImediatamente`
-- `deveBloquearChamadasAcimaDoLimite`
-- `deveResetarJanelaAposIntervalo`
-- `deveTratarMúltiplosClientesSeparadamente`
-
-#### `sse-parser.js` — ⚠️ Mínima (~15%)
-- `deveParseEventoSSESimples`
-- `deveParseEventoSSEComMultiplasLinhas`
-- `deveIgnorarLinhasDeComentário`
-- `deveEmitirEventoComCampoDataCorreto`
-- `deveEmitirEventoComCampoEventCorreto`
-- `deveTratarChunksParciais`
-- `deveTratarStreamVazio`
-
-#### `health.js` — ❌ Sem testes
-- `deveRetornar200QuandoSaudável`
-- `deveRetornar503QuandoTaxaDeErroAcima50pct`
-- `deveIncluirMétricasNaResposta`
-- `deveResponderEmMenosDe100ms`
+| Data | Total Stmts | Total Branch | Total Funcs | Total Lines | Testes |
+|------|-------------|--------------|-------------|-------------|--------|
+| 2026-03-17 | ~4% | — | — | — | ~5 testes |
+| 2026-03-20 | 85.9% | 75.67% | 83.33% | 86.73% | 349 testes |
 
 ---
 
