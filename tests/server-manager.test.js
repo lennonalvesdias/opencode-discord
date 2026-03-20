@@ -349,15 +349,65 @@ describe('OpenCodeServer', () => {
     })
 
     it('chama taskkill com o PID correto quando há processo ativo (Windows)', () => {
-      server.process = { pid: 12345 }
+      // Força o ramo Windows independente do SO que executa os testes
+      const origDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
 
-      server.stop()
+      try {
+        server.process = { pid: 12345, kill: vi.fn() }
 
-      expect(spawn).toHaveBeenCalledWith(
-        'taskkill',
-        ['/pid', '12345', '/T', '/F'],
-        { stdio: 'ignore' }
-      )
+        server.stop()
+
+        expect(spawn).toHaveBeenCalledWith(
+          'taskkill',
+          ['/pid', '12345', '/T', '/F'],
+          { stdio: 'ignore' }
+        )
+      } finally {
+        if (origDescriptor) Object.defineProperty(process, 'platform', origDescriptor)
+      }
+    })
+
+    it('usa process.kill(-pid) com SIGTERM no ramo Linux/Mac', () => {
+      // Força o ramo Linux/Mac independente do SO que executa os testes
+      const origDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+
+      const processKillSpy = vi.spyOn(process, 'kill').mockImplementation(() => {})
+
+      try {
+        server.process = { pid: 12345, kill: vi.fn() }
+
+        server.stop()
+
+        expect(processKillSpy).toHaveBeenCalledWith(-12345, 'SIGTERM')
+        expect(spawn).not.toHaveBeenCalled()
+      } finally {
+        processKillSpy.mockRestore()
+        if (origDescriptor) Object.defineProperty(process, 'platform', origDescriptor)
+      }
+    })
+
+    it('chama this.process.kill quando process.kill de grupo lança ESRCH (Linux/Mac fallback)', () => {
+      // Garante cobertura do catch: quando process.kill(-pid) falha, usa child.kill()
+      const origDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+
+      const processKillSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+      })
+
+      try {
+        const killMock = vi.fn()
+        server.process = { pid: 12345, kill: killMock }
+
+        server.stop()
+
+        expect(killMock).toHaveBeenCalledWith('SIGTERM')
+      } finally {
+        processKillSpy.mockRestore()
+        if (origDescriptor) Object.defineProperty(process, 'platform', origDescriptor)
+      }
     })
 
     it('não lança erro quando process é nulo', () => {
