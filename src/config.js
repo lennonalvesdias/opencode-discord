@@ -2,6 +2,7 @@
 // Configuração centralizada — single source of truth para variáveis de ambiente
 
 import path from 'path';
+import os from 'os';
 
 // ─── Discord ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,12 @@ export const OPENCODE_BASE_PORT = parseInt(process.env.OPENCODE_BASE_PORT || '41
 /** Timeout padrão para chamadas HTTP ao opencode (ms) */
 export const DEFAULT_TIMEOUT_MS = parseInt(process.env.OPENCODE_TIMEOUT_MS || '10000', 10);
 
+/** Lista de modelos de IA disponíveis para seleção no autocomplete */
+export const AVAILABLE_MODELS = (process.env.AVAILABLE_MODELS || 'anthropic/claude-sonnet-4-5,openai/gpt-4o,google/gemini-2.0-flash').split(',');
+
+/** Modelo de IA padrão (vazio = usa o padrão configurado no opencode) */
+export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || '';
+
 // ─── Sessões ──────────────────────────────────────────────────────────────────
 
 /** Máximo de sessões ativas por usuário */
@@ -50,6 +57,9 @@ export const MAX_BUFFER = parseInt(process.env.MAX_BUFFER || '512000', 10);
 /** Limite total de sessões simultâneas no servidor (0 = sem limite) */
 export const MAX_GLOBAL_SESSIONS = parseInt(process.env.MAX_GLOBAL_SESSIONS || '0', 10);
 
+/** Máximo de sessões simultâneas por projeto (0 = sem limite) */
+export const MAX_SESSIONS_PER_PROJECT = parseInt(process.env.MAX_SESSIONS_PER_PROJECT || '2', 10);
+
 // ─── Operações ────────────────────────────────────────────────────────────────
 
 /** Porta do endpoint de health check */
@@ -57,6 +67,10 @@ export const HEALTH_PORT = parseInt(process.env.HEALTH_PORT || '9090', 10);
 
 /** Caminho do arquivo de persistência de sessões (opcional) */
 export const PERSISTENCE_PATH = process.env.PERSISTENCE_PATH || null;
+
+/** Caminho do arquivo de auditoria NDJSON (padrão: ~/.opencode-discord/audit.ndjson) */
+export const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH ||
+  path.join(os.homedir(), '.opencode-discord', 'audit.ndjson');
 
 // ─── Timeouts internos ────────────────────────────────────────────────────────
 
@@ -80,6 +94,9 @@ export const CHANNEL_FETCH_TIMEOUT_MS = parseInt(process.env.CHANNEL_FETCH_TIMEO
 
 /** Cooldown em ms após circuit breaker do servidor OpenCode (padrão: 60000) */
 export const SERVER_CIRCUIT_BREAKER_COOLDOWN_MS = parseInt(process.env.SERVER_CIRCUIT_BREAKER_COOLDOWN_MS || '60000', 10);
+
+/** Timeout em ms para aprovação interativa de permissão antes do auto-approve (padrão: 60000) */
+export const PERMISSION_TIMEOUT_MS = parseInt(process.env.PERMISSION_TIMEOUT_MS || '60000', 10);
 
 // ─── Utilitários ──────────────────────────────────────────────────────────────
 

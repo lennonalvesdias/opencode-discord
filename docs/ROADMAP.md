@@ -1,8 +1,8 @@
 # 🗺️ ROADMAP — opencode-discord
 
-> **Versão atual:** v1.3.0-rc (release candidate)
+> **Versão atual:** v1.3.0 (release)
 > **Última atualização:** 2026-03-20
-> **Status:** Fase 1 concluída — iniciando Fase 2
+> **Status:** Fase 1 concluída (100%) — iniciando Fase 2
 
 Mapeamento completo de evoluções planejadas para o projeto `opencode-discord`, com análise de impacto, esforço e risco para cada funcionalidade.
 
@@ -18,7 +18,7 @@ O produto respeita intencionalmente a filosofia minimalista herdada do projeto-p
 
 ---
 
-## ✅ Estado Atual (v1.3.0-rc)
+## ✅ Estado Atual (v1.3.0)
 
 ### O que funciona hoje
 
@@ -29,6 +29,7 @@ O produto respeita intencionalmente a filosofia minimalista herdada do projeto-p
 - ✅ Comandos inline `/stop` e `/status` direto na thread
 - ✅ Aprovação automática de permissões `tool_use` com retry (3 tentativas)
 - ✅ Preview de diffs: inline com syntax highlighting ou como arquivo `.diff`
+- ✅ **Comando `/diff`** — slash command expondo preview de diffs
 - ✅ Exibição de perguntas do agente na thread
 - ✅ Notificações por DM ao término da sessão (`ENABLE_DM_NOTIFICATIONS`)
 - ✅ Rate limiting por usuário (5 ações/minuto, janela deslizante)
@@ -47,21 +48,20 @@ O produto respeita intencionalmente a filosofia minimalista herdada do projeto-p
 - ✅ Sanitização de ambiente antes de passar ao processo filho (sem vazar `DISCORD_TOKEN`)
 - ✅ Cache de autocomplete de projetos com TTL de 60 s (+ proteção contra cache stampede)
 - ✅ Health check retorna HTTP 503 quando >50% dos servidores em erro (com payload `servers[]`)
+- ✅ **Persistência JSON** — sessões salvas em `~/.opencode-discord/data.json` com serialização serial
 - ✅ Cobertura de testes 85,9% (349 testes com Vitest — meta v1.3 de 30% superada; meta Fase 2: 90%+)
 - ✅ Bugs B-09, B-10 e B-11 corrigidos
 - ✅ Refatoração S-12 concluída (`_handleIdleTransition()` extraído)
 - ✅ Teto máximo de porta em `_doAllocatePort()` com erro descritivo
 
-### Gaps conhecidos
+### Gaps conhecidos (Fase 2)
 
-- ❌ Sem persistência: sessões perdidas ao reiniciar o bot
 - ❌ Sem fila de tarefas: mensagens enviadas durante execução são silenciosamente descartadas
 - ❌ Aprovação de permissão é sempre automática (sem opção de negar via Discord)
 - ❌ Sem seleção de modelo AI via Discord
 - ❌ Sem modo passthrough (digitação livre sem slash commands)
 - ❌ Sem endpoint `/metrics` compatível com Prometheus
 - ❌ Sem audit logging estruturado
-- ❌ Sem slash command `/diff` (preview existe mas não é exposto como comando)
 - ❌ Sem suporte a upload de arquivos como contexto para o agente
 - ❌ Sem voice input
 - ❌ Sem browser de sessões (reconectar a sessão existente via nova thread)
@@ -70,16 +70,9 @@ O produto respeita intencionalmente a filosofia minimalista herdada do projeto-p
 
 ## 🚀 Próximos Passos (Ação Imediata)
 
-> **Fase 1 está 80% concluída.** Dois itens restantes antes de marcar v1.3 como estável:
+> **Fase 1 está 100% concluída.** Todos os 10 itens planejados foram implementados.
 
-### Itens pendentes da Fase 1 (baixo esforço, alta prioridade)
-
-| # | Item | Arquivo | Esforço | Observação |
-|---|---|---|---|---|
-| 1 | **Comando `/diff`** | `commands.js` + `stream-handler.js` | ~2h | Expor `_sendDiffPreview()` como slash command |
-| 2 | **Persistência JSON** | Novo `src/persistence.js` | ~4h | Salvar `threadId↔sessionId` em `~/.opencode-discord/data.json` |
-
-### Fase 2 — Itens de maior impacto para iniciar após v1.3
+### Fase 2 — Itens de maior impacto para iniciar agora
 
 | Prioridade | Item | Justificativa |
 |---|---|---|
@@ -89,6 +82,8 @@ O produto respeita intencionalmente a filosofia minimalista herdada do projeto-p
 | 🟡 Média | **Seleção de modelo AI** | Diferencial competitivo vs remote-opencode |
 | 🟡 Média | **Endpoint `/metrics`** | Observabilidade para produção |
 | 🟡 Média | **Audit logging SQLite** | Conformidade e debugging |
+| 🟡 Média | **Rate limiting por projeto** | Evita monopolização de recursos |
+| 🟡 Média | **Cobertura 90%+** | Meta de qualidade para próxima versão
 
 ---
 
@@ -103,91 +98,93 @@ O produto respeita intencionalmente a filosofia minimalista herdada do projeto-p
 
 ## 📊 Matriz de Impacto × Esforço
 
-| Funcionalidade | Impacto | Esforço | Prioridade | Fase |
-|---|---|---|---|---|
-| Cobertura de testes 30% ✅ 85,9% (Concluído) | Alto | Médio | 🔴 Crítico | Fase 1 |
-| Cache do autocomplete ✅ Concluído | Médio | Baixo | 🔴 Alta | Fase 1 |
-| Health check 503 ✅ Concluído | Médio | Baixo | 🔴 Alta | Fase 1 |
-| Comando `/diff` | Médio | Baixo | 🔴 Alta | Fase 1 |
-| Fix B-09 / B-10 / B-11 ✅ Concluído | Alto | Baixo | 🔴 Alta | Fase 1 |
-| Persistência de sessões | Alto | Médio | 🔴 Alta | Fase 1 |
-| Fila de tarefas | Alto | Médio | 🔴 Alta | Fase 2 |
-| Botões de aprovação | Alto | Médio | 🔴 Alta | Fase 2 |
-| Modo passthrough | Alto | Baixo | 🔴 Alta | Fase 2 |
-| Endpoint `/metrics` | Médio | Médio | 🟡 Média | Fase 2 |
-| Audit logging SQLite | Médio | Médio | 🟡 Média | Fase 2 |
-| Seleção de modelo AI | Alto | Médio | 🟡 Média | Fase 2 |
-| Rate limiting por projeto | Médio | Baixo | 🟡 Média | Fase 2 |
-| Git Worktrees | Alto | Alto | 🟡 Média | Fase 3 |
-| Browser de sessões | Médio | Médio | 🟡 Média | Fase 3 |
-| Upload de arquivos | Alto | Médio | 🟡 Média | Fase 3 |
-| Voice input (Whisper) | Alto | Alto | 🟡 Média | Fase 3 |
-| Wizard de setup | Médio | Médio | 🟢 Baixa | Fase 3 |
-| Dashboard web | Médio | Alto | 🟢 Baixa | Fase 4 |
-| Publicação npm | Alto | Médio | 🟢 Baixa | Fase 4 |
-| Adapter Telegram | Médio | Alto | 🟢 Baixa | Fase 4 |
-| Webhook CI/CD | Médio | Médio | 🟢 Baixa | Fase 4 |
+| Funcionalidade | Impacto | Esforço | Prioridade | Fase | Status |
+|---|---|---|---|---|---|
+| Cobertura de testes 85,9% | Alto | Médio | 🔴 Crítico | Fase 1 | ✅ Concluído |
+| Cache do autocomplete | Médio | Baixo | 🔴 Alta | Fase 1 | ✅ Concluído |
+| Health check 503 | Médio | Baixo | 🔴 Alta | Fase 1 | ✅ Concluído |
+| Comando `/diff` | Médio | Baixo | 🔴 Alta | Fase 1 | ✅ Concluído |
+| Fix B-09 / B-10 / B-11 | Alto | Baixo | 🔴 Alta | Fase 1 | ✅ Concluído |
+| Persistência de sessões | Alto | Médio | 🔴 Alta | Fase 1 | ✅ Concluído |
+| Refatoração S-12 | Baixo | Baixo | 🔴 Alta | Fase 1 | ✅ Concluído |
+| Fila de tarefas | Alto | Médio | 🔴 Alta | Fase 2 | 🔄 Planejado |
+| Botões de aprovação | Alto | Médio | 🔴 Alta | Fase 2 | 🔄 Planejado |
+| Modo passthrough | Alto | Baixo | 🔴 Alta | Fase 2 | 🔄 Planejado |
+| Endpoint `/metrics` | Médio | Médio | 🟡 Média | Fase 2 | 🔄 Planejado |
+| Audit logging SQLite | Médio | Médio | 🟡 Média | Fase 2 | 🔄 Planejado |
+| Seleção de modelo AI | Alto | Médio | 🟡 Média | Fase 2 | 🔄 Planejado |
+| Rate limiting por projeto | Médio | Baixo | 🟡 Média | Fase 2 | 🔄 Planejado |
+| Cobertura 90%+ | Alto | Médio | 🟡 Média | Fase 2 | 🔄 Planejado |
+| Git Worktrees | Alto | Alto | 🟡 Média | Fase 3 | ⏳ Futuro |
+| Browser de sessões | Médio | Médio | 🟡 Média | Fase 3 | ⏳ Futuro |
+| Upload de arquivos | Alto | Médio | 🟡 Média | Fase 3 | ⏳ Futuro |
+| Voice input (Whisper) | Alto | Alto | 🟡 Média | Fase 3 | ⏳ Futuro |
+| Wizard de setup | Médio | Médio | 🟢 Baixa | Fase 3 | ⏳ Futuro |
+| Dashboard web | Médio | Alto | 🟢 Baixa | Fase 4 | ⏳ Futuro |
+| Publicação npm | Alto | Médio | 🟢 Baixa | Fase 4 | ⏳ Futuro |
+| Adapter Telegram | Médio | Alto | 🟢 Baixa | Fase 4 | ⏳ Futuro |
+| Webhook CI/CD | Médio | Médio | 🟢 Baixa | Fase 4 | ⏳ Futuro |
 
 ---
 
 ## 🚀 Fases de Evolução
 
-### Fase 1 — Qualidade (v1.3) · Meta: Q1 2026 ✅ Quase concluída (8/10)
+### Fase 1 — Qualidade (v1.3) · Meta: Q1 2026 ✅ CONCLUÍDA (10/10)
 
 > Foco: corrigir bugs abertos, elevar cobertura de testes, melhorar observabilidade e resolver os code smells mais impactantes. Zero novas features até atingir 30% de cobertura.
 
-> **8/10 itens concluídos.** Pendentes: `/diff` command e Persistência JSON.
+> **10/10 itens concluídos — 100% de conclusão.** Todos os objetivos da Fase 1 atingidos.
 
-| Feature | Descrição | Impacto | Esforço | Risco | Requisito | Status |
-|---|---|---|---|---|---|---|
-| **Cobertura 30%** | Testar `utils.js`, `rate-limiter.js`, `sse-parser.js`, `config.js`, `session-manager.js` com Jest/Vitest | Alto | Médio | Baixo | ISSUES B-09 a B-11 | ✅ Concluído (85,9% — superado) |
-| **Fix B-09** | `_checkTimeouts()`: adicionar `await` e resolver double-delete com o setTimeout de cleanup | Alto | Baixo | Baixo | — | ✅ Concluído (2026-03-19) |
-| **Fix B-10** | Rastrear timer de arquivamento em `this._archiveTimer`; cancelar em `stop()` | Médio | Baixo | Baixo | — | ✅ Concluído (2026-03-19) |
-| **Fix B-11** | Try-catch em `createSessionInThread()`; arquivar thread órfã em caso de falha | Médio | Baixo | Baixo | — | ✅ Concluído (2026-03-19) |
-| **Cache autocomplete** | `getProjects()` e `listOpenCodeCommands()`: cache em memória com TTL de 60 s | Médio | Baixo | Baixo | S-09 | ✅ Concluído (2026-03-19) |
-| **Health check 503** | Retornar 503 se `errorRate > 0.5`; incluir `servers[]` no payload com estado do circuit breaker | Médio | Baixo | Baixo | S-10 | ✅ Concluído (2026-03-19) |
-| **Comando `/diff`** | Slash command que exibe diff staged/unstaged do projeto; usa lógica já existente de `_sendDiffPreview()` | Médio | Baixo | Baixo | — | 🔄 Pendente |
-| **Refatorar S-12** | Extrair `_handleIdleTransition()` em `session-manager.js` | Baixo | Baixo | Baixo | S-12 | ✅ Concluído (2026-03-19) |
-| **Limite `_doAllocatePort()`** | Adicionar teto máximo (ex: porta base + 200) e erro descritivo | Baixo | Baixo | Baixo | S-11 | ✅ Concluído (2026-03-19) |
-| **Persistência JSON** | Salvar `threadId↔sessionId↔status` em `~/.opencode-discord/data.json`; mostrar na thread ao reiniciar | Alto | Médio | Médio | — | 🔄 Pendente |
-
----
-
-### Fase 2 — Resiliência (v1.4) · Meta: Q2 2026 🔄 Em planejamento
-
-> Foco: tornar o bot robusto para uso intensivo em equipes. Fila de tarefas, aprovação de permissões via botões, observabilidade completa.
-
-| Feature | Descrição | Impacto | Esforço | Risco |
-|---|---|---|---|---|
-| **`/diff` command** | Slash command que exibe diff staged/unstaged do projeto; usa lógica já existente de `_sendDiffPreview()` em `stream-handler.js:138-167` | Médio | Baixo | Baixo |
-| **Persistência JSON** | Salvar `threadId↔sessionId↔status` em `~/.opencode-discord/data.json`; mostrar na thread ao reiniciar | Alto | Médio | Médio |
-| **Fila de tarefas** | Mensagens enviadas enquanto sessão está `running` ficam na fila com reação 📥; processadas automaticamente ao idle; suporte a `/fila ver` e `/fila limpar` | Alto | Médio | Médio |
-| **Botões de aprovação** | Substituir aprovação automática por botões Discord "✅ Aprovar" / "❌ Negar" com timeout de 60 s; fallback para aprovação automática se ninguém responder | Alto | Médio | Médio |
-| **Modo passthrough** | `/modo passthrough` ativa forwarding de todas as mensagens da thread para o agente sem slash command; indicador visual no embed inicial; `/modo normal` reverte | Alto | Baixo | Baixo |
-| **Seleção de modelo AI** | `/modelo set <nome>` persiste por thread no arquivo de persistência; `/modelo ver` exibe atual; autocomplete com lista de modelos do opencode | Alto | Médio | Médio |
-| **Endpoint `/metrics`** | Exportar métricas Prometheus: `sessions_active`, `sessions_total`, `messages_sent_total`, `errors_total`, `flush_latency_ms` | Médio | Médio | Baixo |
-| **Audit logging** | Registrar em SQLite leve (`~/.opencode-discord/audit.db`): user_id, session_id, projeto, prompt_inicial, timestamp; `/auditoria` para admins | Médio | Médio | Baixo |
-| **Rate limiting por projeto** | `MAX_SESSIONS_PER_PROJECT` env var; rejeitar novas sessões se projeto já tiver o limite atingido | Médio | Baixo | Baixo |
-| **Cobertura 90%** | Expandir testes para cobrir edge cases em `opencode-client.js`, `commands.js`, `health.js`; atual: 85,9% — meta: 90%+ | Alto | Médio | Baixo |
+| Feature | Descrição | Impacto | Esforço | Risco | Status |
+|---|---|---|---|---|---|
+| **Cobertura 85,9%** | Testar `utils.js`, `rate-limiter.js`, `sse-parser.js`, `config.js`, `session-manager.js` e mais com Vitest | Alto | Médio | Baixo | ✅ Concluído (349 testes) |
+| **Fix B-09** | `_checkTimeouts()`: adicionar `await` e resolver double-delete com o setTimeout de cleanup | Alto | Baixo | Baixo | ✅ Concluído (2026-03-19) |
+| **Fix B-10** | Rastrear timer de arquivamento em `this._archiveTimer`; cancelar em `stop()` | Médio | Baixo | Baixo | ✅ Concluído (2026-03-19) |
+| **Fix B-11** | Try-catch em `createSessionInThread()`; arquivar thread órfã em caso de falha | Médio | Baixo | Baixo | ✅ Concluído (2026-03-19) |
+| **Cache autocomplete** | `getProjects()` e `listOpenCodeCommands()`: cache em memória com TTL de 60 s | Médio | Baixo | Baixo | ✅ Concluído (2026-03-19) |
+| **Health check 503** | Retornar 503 se `errorRate > 0.5`; incluir `servers[]` no payload com estado do circuit breaker | Médio | Baixo | Baixo | ✅ Concluído (2026-03-19) |
+| **Comando `/diff`** | Slash command que exibe diff staged/unstaged do projeto; usa lógica já existente de `_sendDiffPreview()` | Médio | Baixo | Baixo | ✅ Concluído (2026-03-20) |
+| **Refatorar S-12** | Extrair `_handleIdleTransition()` em `session-manager.js` | Baixo | Baixo | Baixo | ✅ Concluído (2026-03-19) |
+| **Limite `_doAllocatePort()`** | Adicionar teto máximo (ex: porta base + 200) e erro descritivo | Baixo | Baixo | Baixo | ✅ Concluído (2026-03-19) |
+| **Persistência JSON** | Salvar `threadId↔sessionId↔status` em `~/.opencode-discord/data.json`; mostrar na thread ao reiniciar | Alto | Médio | Médio | ✅ Concluído (2026-03-20) |
 
 ---
 
-### Fase 3 — Poder (v2.0) · Meta: Q3 2026
+### Fase 2 — Resiliência (v1.4) · Meta: Q2 2026 🔄 Iniciando agora
+
+> Foco: tornar o bot robusto para uso intensivo em equipes. Fila de tarefas, aprovação de permissões via botões, observabilidade completa, meta de cobertura 90%+.
+
+| Feature | Descrição | Impacto | Esforço | Risco | Status |
+|---|---|---|---|---|---|
+| **Fila de tarefas** | Mensagens enquanto `running` → fila com reação 📥; processadas ao idle; `/fila ver`, `/fila limpar` | Alto | Médio | Médio | 🔄 A iniciar |
+| **Botões de aprovação** | "✅ Aprovar" / "❌ Negar" inline com timeout 60 s; fallback automático se não respondido | Alto | Médio | Médio | 🔄 A iniciar |
+| **Modo passthrough** | `/modo passthrough` ativa forwarding sem slash command; indicador visual no embed; `/modo normal` reverte | Alto | Baixo | Baixo | 🔄 A iniciar |
+| **Seleção de modelo AI** | `/modelo set <nome>` persiste em `data.json`; `/modelo ver` exibe; autocomplete com modelos | Alto | Médio | Médio | 🔄 A iniciar |
+| **Endpoint `/metrics`** | Prometheus: `sessions_active`, `sessions_total`, `messages_sent_total`, `errors_total`, `flush_latency_ms` | Médio | Médio | Baixo | 🔄 A iniciar |
+| **Audit logging** | SQLite leve (`~/.opencode-discord/audit.db`): user_id, session_id, projeto, prompt, timestamp; `/auditoria` | Médio | Médio | Baixo | 🔄 A iniciar |
+| **Rate limiting/projeto** | `MAX_SESSIONS_PER_PROJECT` env var; rejeitar se limite atingido | Médio | Baixo | Baixo | 🔄 A iniciar |
+| **Cobertura 90%+** | Expandir testes para edge cases em `opencode-client.js`, `commands.js`, `health.js` | Alto | Médio | Baixo | 🔄 A iniciar |
+
+**Versão meta:** v1.4.0 (Q2 2026)
+
+---
+
+### Fase 3 — Poder (v2.0) · Meta: Q3 2026 ⏳ Futuro
 
 > Foco: funcionalidades avançadas que transformam o bot em uma plataforma completa de agentes remotos.
 
 | Feature | Descrição | Impacto | Esforço | Risco |
 |---|---|---|---|---|
-| **Git Worktrees** | `/trabalho [projeto] [branch]` cria worktree isolada por sessão; branch automática baseada no prompt; merge via botão Discord; previne conflitos entre sessões paralelas do mesmo projeto | Alto | Alto | Alto |
-| **Browser de sessões** | `/sessao lista` exibe todas (ativas + arquivadas com status); `/sessao conectar [id]` re-anexa sessão a nova thread; `/sessao desconectar` libera thread sem fechar processo | Médio | Médio | Médio |
-| **Upload de arquivos** | Anexos Discord (`.js`, `.ts`, `.md`, `.txt`, `.json`) detectados automaticamente; salvos em diretório temp do projeto antes de enviar prompt; exibição de preview do nome dos arquivos | Alto | Médio | Médio |
-| **Voice input** | Arquivos `.ogg` e `.mp3` anexados à thread transcritos via OpenAI Whisper REST (`whisper-1`); transcrição exibida como preview antes de enviar ao agente; configurável via `OPENAI_API_KEY` | Alto | Alto | Médio |
-| **Wizard de setup** | `node src/setup.js` guia o usuário pelo setup completo: Discord token, guild ID, projetos, modelo AI, serviço Windows; validação em tempo real com feedback colorido | Médio | Médio | Baixo |
-| **Cobertura 65%** | Expandir testes para `server-manager.js`, `stream-handler.js`, `index.js` | Alto | Alto | Médio |
+| **Git Worktrees** | `/trabalho [projeto] [branch]` cria worktree isolada por sessão; previne conflitos entre sessões paralelas | Alto | Alto | Alto |
+| **Browser de sessões** | `/sessao lista` exibe todas (ativas + arquivadas); `/sessao conectar [id]` re-anexa a nova thread | Médio | Médio | Médio |
+| **Upload de arquivos** | Anexos Discord (`.js`, `.ts`, `.md`, `.txt`) detectados; salvos em temp do projeto antes de enviar prompt | Alto | Médio | Médio |
+| **Voice input** | Arquivos `.ogg`/`.mp3` transcritos via OpenAI Whisper REST (`whisper-1`); configurável via `OPENAI_API_KEY` | Alto | Alto | Médio |
+| **Wizard de setup** | `node src/setup.js` guia setup completo com validação em tempo real | Médio | Médio | Baixo |
+| **Cobertura 65%+** | Expandir testes para `server-manager.js`, `stream-handler.js`, `index.js` | Alto | Alto | Médio |
 
 ---
 
-### Fase 4 — Distribuição (v2.x) · Meta: 2027+
+### Fase 4 — Distribuição (v2.x) · Meta: 2027+ ⏳ Futuro
 
 > Foco: alcançar outros desenvolvedores, outras plataformas, outros casos de uso.
 
@@ -196,8 +193,8 @@ O produto respeita intencionalmente a filosofia minimalista herdada do projeto-p
 | **Dashboard web** | Página HTML servida na porta `DASHBOARD_PORT`; exibe sessões ativas, estado dos servidores, histórico de erros, métricas em tempo real; sem dependências de framework | Médio | Alto | Baixo |
 | **Publicação npm** | Publicar `opencode-discord` no npm; `npx opencode-discord setup` e `npx opencode-discord start`; versionamento semântico com changelog automático | Alto | Médio | Baixo |
 | **Adapter Telegram** | Extrair camada de transporte (Discord-specific) para interface genérica `BotAdapter`; implementar `TelegramAdapter`; mesma lógica de sessões e agentes para ambos | Médio | Alto | Alto |
-| **Webhook CI/CD** | Endpoint HTTP `POST /webhook` que recebe payload GitHub/GitLab (PR opened, merge, push) e inicia sessão opencode automaticamente com contexto do evento | Médio | Médio | Médio |
-| **Integração VS Code Remote** | Extensão VS Code que expõe o mesmo bot como painel lateral; útil para ambientes remotos onde o Discord não está disponível mas o VS Code está | Médio | Alto | Alto |
+| **Webhook CI/CD** | Endpoint HTTP `POST /webhook` recebe payload GitHub/GitLab (PR opened, merge, push) e inicia sessão opencode automaticamente | Médio | Médio | Médio |
+| **Integração VS Code Remote** | Extensão VS Code que expõe o mesmo bot como painel lateral para ambientes remotos | Médio | Alto | Alto |
 
 ---
 

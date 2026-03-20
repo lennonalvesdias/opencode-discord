@@ -74,10 +74,9 @@
 
 | Fase | Meta Total | Prazo | Status | Módulos Prioritários |
 |---|---|---|---|---|
-| Atual | **85.9%** | — | ✅ | — |
-| v1.3 | **30%** | Q1 2026 | ✅ Atingido | `utils.js`, `rate-limiter.js`, `sse-parser.js`, `config.js`, `session-manager.js` |
-| v1.4 | **50%** | Q2 2026 | ✅ Atingido | + `opencode-client.js`, `commands.js`, `health.js` |
-| v2.0 | **65%** | Q3 2026 | ✅ Atingido | + `server-manager.js`, `stream-handler.js`, `index.js` |
+| **Fase 1** (v1.3) | **85.9%** | Q1 2026 | ✅ **CONCLUÍDA** | Todos os 12 módulos |
+| **Fase 2** (v1.4) | **90%+** | Q2 2026 | 🔄 Em planejamento | `opencode-client.js`, `commands.js`, `health.js` (edge cases) |
+| **Fase 3** (v2.0) | **65%** | Q3 2026 | ⏳ Futuro | `server-manager.js`, `stream-handler.js`, `index.js` |
 
 **Ordem recomendada de implementação de testes:**
 
@@ -105,48 +104,56 @@
 
 ## 🚀 Evoluções & Melhorias
 
-### ⚡ Imediato (patches v1.x)
+### ✅ Fase 1 — Concluída (v1.3.0 — 2026-03-20)
 
-- **Cobertura de testes** — expandir de ~4% para 30%+ (módulo a módulo, começando por `utils.js`, `rate-limiter.js`, `sse-parser.js`, `config.js`, depois `session-manager.js`, depois `commands.js`)
-- **Corrigir B-09, B-10, B-11** — novos bugs identificados na revisão: `_checkTimeouts` sem await, archive timer não rastreado, thread órfã em falha de sessão
-- **Cache do autocomplete** — `listOpenCodeCommands()` e `getProjects()` (S-09) chamam filesystem a cada tecla; adicionar cache em memória com TTL de 60 s
-- **Health check 503** — `/health` retorna 200 sempre; retornar HTTP 503 se taxa de erro das últimas sessões > 50%, e incluir estado dos `OpenCodeServer`s no payload (S-10)
-- **Comando `/diff` completo** — já existe preview de diff emitido via eventos SSE em `stream-handler.js`; expor como slash command `/diff` com opções (staged, unstaged, branch)
-- **Refatorar `_handleIdleTransition()`** — eliminar duplicação de lógica entre `session.status` e `session.idle` em `session-manager.js` (S-12)
-- **Limite em `_doAllocatePort()`** — adicionar teto máximo de portas para evitar loop teórico infinito (S-11)
+**Status: 100% COMPLETA** — Todos os 10 itens implementados.
 
----
-
-### 🔴 Alta Prioridade (v1.3 — Estabilidade)
-
-- **Persistência de sessões** — salvar mapeamento `threadId↔sessionId↔port` em `~/.opencode-discord/data.json`; ao reiniciar, exibir na thread o último status conhecido (sem retomar o processo opencode)
-- **Fila de tarefas (job queue)** — quando sessão está ocupada (status ≠ idle), enfileirar mensagens com reação 📥; processar automaticamente quando sessão ficar idle; suporte a pause/resume via `/fila`
-- **Modo passthrough** — comando `/modo` toggle: libera thread para digitação livre → tudo vai direto para opencode (sem precisar de `/build`, `/plan` etc.); útil para conversas longas; indicador visual no embed
-- **Seleção de modelo AI** — `/modelo set claude-3-7/gpt-4o` persiste por canal; `/modelo ver` exibe atual; autocomplete com modelos disponíveis
-- **Botões de aprovação de permissão** — quando opencode pede permissão para tool_use, enviar botões Discord "✅ Aprovar" / "❌ Negar" inline na thread em vez de aprovação automática; ephemeral para o dono da sessão
-- **Endpoint `/metrics` Prometheus** — exportar: `sessions_active`, `sessions_total`, `messages_sent`, `error_rate`, `flush_latency_ms`; scrape-friendly
-- **Audit logging estruturado** — registrar em SQLite leve (`~/.opencode-discord/audit.db`): quem criou qual sessão, quando, com qual prompt; `/auditoria` command para admins
+| Item | Arquivo | Status | Resolução |
+|---|---|---|---|
+| Cobertura de testes (30%+) | Todos | ✅ | **85.9% atingido** — superou meta com 349 testes Vitest |
+| B-09: `_checkTimeouts` async | `session-manager.js` | ✅ | `_expireSession()` extraído; close aguardado; deleção em dois tempos |
+| B-10: Archive timer rastreado | `stream-handler.js` | ✅ | `_archiveTimer` adicionado; cancelado em `stop()` |
+| B-11: Thread órfã prevenida | `commands.js` | ✅ | Try-catch em `createSessionInThread()`; thread deletada em erro |
+| Cache autocomplete (S-09) | `commands.js` | ✅ | `getProjects()` async com TTL 60 s; proteção contra cache stampede |
+| Health check 503 (S-10) | `health.js` | ✅ | Retorna HTTP 503 se >50% dos servidores em erro; inclui `servers[]` |
+| Comando `/diff` | `commands.js` | ✅ | `handleDiffCommand()` expõe preview de diffs (inline/arquivo) |
+| Refatorar S-12 | `session-manager.js` | ✅ | `_handleIdleTransition()` centralizado; duplicação eliminada |
+| Limite `_doAllocatePort()` (S-11) | `server-manager.js` | ✅ | Teto `PORT_SCAN_MAX_RANGE = 200`; erro descritivo |
+| Persistência JSON | `src/persistence.js` | ✅ | `~/.opencode-discord/data.json` com serialização serial |
 
 ---
 
-### 🟡 Média Prioridade (v2.0 — Poder)
+### 🔴 Fase 2 — Pendente (v1.4+ — Q2 2026)
 
-- **Git Worktrees** — comando `/trabalho [projeto] [branch]` cria worktree isolada por sessão; `/autotrabalho` cria branch automática baseada no prompt; merge via botão Discord; previne conflitos entre sessões paralelas
-- **Browser de sessões** — `/sessao lista` mostra todas (ativas + arquivadas); `/sessao conectar [id]` re-anexa uma sessão a uma thread nova; `/sessao desconectar` desvincula thread sem fechar sessão
-- **Voice input** — transcreve mensagens de voz Discord (arquivos `.ogg`) via OpenAI Whisper REST (`whisper-1`); transcrição exibida antes de enviar ao opencode; configurável via `OPENAI_API_KEY`
-- **Upload de arquivos** — anexos Discord (`.js`, `.ts`, `.md`, `.txt`) salvos automaticamente no projeto antes de enviar o prompt ao opencode; útil para "refatora este arquivo"
-- **Wizard de setup interativo** — `node src/setup.js` guia o usuário pelo setup (token, guild, projetos, serviço Windows) com validação em tempo real
-- **Rate limiting por projeto** — complementar ao limite por usuário; impedir que um único projeto consuma todos os slots disponíveis com `MAX_SESSIONS_PER_PROJECT`
+**Status: A INICIAR** — 8 itens identificados para próxima fase.
+
+| Item | Prioridade | Arquivo | Descrição |
+|---|---|---|---|
+| Fila de tarefas | 🔴 Alta | `session-manager.js` | Mensagens durante `running` enfileiradas com reação 📥; processadas ao idle |
+| Botões de aprovação | 🔴 Alta | `stream-handler.js` | "✅ Aprovar" / "❌ Negar" inline (timeout 60 s); fallback automático |
+| Modo passthrough | 🔴 Alta | `commands.js` | `/modo passthrough` ativa forwarding de mensagens sem slash command |
+| Seleção de modelo AI | 🟡 Média | `persistence.js` | `/modelo set <nome>` persiste em `data.json`; autocomplete com modelos |
+| Endpoint `/metrics` | 🟡 Média | `health.js` | Prometheus: `sessions_active`, `sessions_total`, `messages_sent_total`, `errors_total`, `flush_latency_ms` |
+| Audit logging | 🟡 Média | Novo: `src/audit.js` | SQLite leve em `~/.opencode-discord/audit.db`; `/auditoria` command para admins |
+| Rate limiting por projeto | 🟡 Média | `config.js`, `commands.js` | `MAX_SESSIONS_PER_PROJECT` env var; rejeitar se limite atingido |
+| Cobertura 90%+ | 🟡 Média | Todos | Expandir testes para 90% statements; target: edge cases em `opencode-client.js`, `commands.js`, `health.js` |
 
 ---
 
-### 💡 Nice to Have (v2.x+)
+### ⚡ Patches Imediatos (v1.3.x)
 
-- **Dashboard web de monitoramento** — página HTML simples servida na porta `DASHBOARD_PORT`; mostra sessões ativas, servidores, histórico de erros, métricas em tempo real
-- **Adapter para Telegram** — mesma lógica de negócio, interface diferente; extrair camada de transporte para permitir múltiplos adapters
-- **Publicação npm** — publicar `opencode-discord` no npm com `npx opencode-discord setup` e `npx opencode-discord start`
-- **Webhook CI/CD** — endpoint HTTP que recebe payload de webhook (GitHub, GitLab) e inicia sessão opencode automaticamente em trigger de PR/merge
-- **Integração VS Code Remote** — extensão VS Code que expõe o mesmo bot como painel lateral para ambientes remotos
+- Nenhum bug crítico pendente — Fase 1 concluída com alta qualidade
+
+---
+
+### 🟡 Média Prioridade (v2.0+ — Futuro)
+
+- **Git Worktrees** — `/trabalho [projeto] [branch]` cria worktree isolada por sessão; previne conflitos entre sessões paralelas
+- **Browser de sessões** — `/sessao lista` exibe todas (ativas + arquivadas); `/sessao conectar` re-anexa sessão a thread nova
+- **Upload de arquivos** — anexos Discord (`.js`, `.ts`, `.md`, `.txt`) salvos automaticamente no projeto antes de enviar prompt
+- **Voice input** — transcrição via OpenAI Whisper REST (`whisper-1`); configurável via `OPENAI_API_KEY`
+- **Wizard de setup interativo** — `node src/setup.js` guia o usuário pelo setup completo
+- **Dashboard web** — página HTML simples na porta `DASHBOARD_PORT`; exibe sessões ativas, métricas em tempo real
 
 ---
 

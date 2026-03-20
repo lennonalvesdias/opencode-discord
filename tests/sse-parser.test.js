@@ -124,4 +124,43 @@ describe('parseSSEStream', () => {
     // Multiline data é juntada com \n — como não é JSON válido, retorna string
     expect(events[0].data).toBe('line1\nline2');
   });
+
+  it('ativa console.debug quando process.env.DEBUG está definido e data não é JSON', async () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    process.env.DEBUG = '1';
+
+    const events = [];
+    const response = createMockResponse(['data: texto puro\n\n']);
+    await parseSSEStream(response, (e) => events.push(e));
+
+    delete process.env.DEBUG;
+
+    expect(debugSpy).toHaveBeenCalled();
+    expect(events[0].data).toBe('texto puro');
+    debugSpy.mockRestore();
+  });
+
+  it('processa conteúdo restante no buffer após encerramento do stream sem separador final', async () => {
+    const events = [];
+    // Segundo chunk não tem \n\n — fica no buffer e é processado via linha 84
+    const response = createMockResponse(['data: {"ok":true}\n\n', 'data: incompleto']);
+    await parseSSEStream(response, (e) => events.push(e));
+    // Apenas o primeiro evento completo é despachado
+    expect(events).toHaveLength(1);
+  });
+
+  it('retorna silenciosamente quando stream lança AbortError', async () => {
+    const abortErr = new Error('aborted');
+    abortErr.name = 'AbortError';
+    const stream = new ReadableStream({ start(c) { c.error(abortErr); } });
+    await expect(parseSSEStream({ body: stream }, () => {})).resolves.toBeUndefined();
+  });
+
+  it('propaga erros não-AbortError e chama onError', async () => {
+    const err = new Error('network error');
+    const onError = vi.fn();
+    const stream = new ReadableStream({ start(c) { c.error(err); } });
+    await expect(parseSSEStream({ body: stream }, () => {}, onError)).rejects.toThrow('network error');
+    expect(onError).toHaveBeenCalledWith(err);
+  });
 });

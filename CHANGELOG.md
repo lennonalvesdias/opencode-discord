@@ -6,6 +6,48 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.
 
 ---
 
+## [1.3.0] - 2026-03-20
+
+### Adicionado
+
+- **Comando `/diff`** — exibe diff Git da sessão na thread
+  - Diffs pequenos (< 1500 chars): inline com syntax highlighting
+  - Diffs grandes: enviados como arquivo `.diff` anexo
+  - Suporte a múltiplos diffs por evento (`handleDiffCommand` em `commands.js`)
+- **Persistência de sessões** — salva estado em `~/.opencode-discord/data.json`
+  - Serialização serial com serializer customizado para evitar race conditions
+  - Recuperação de sessão ao reiniciar o bot (exibe último status na thread)
+  - Formato: `{ threads: { threadId: { sessionId, port, status, projectPath } } }`
+
+### Melhorado
+
+- **Circuit breaker para servidores com falha** — cooldown de 60 s após 3 reinícios consecutivos
+  - Health check detecta servidores indisponíveis e rejeita novas sessões temporariamente
+  - Risco de "thundering herd" mitigado com exponential backoff
+- **Auto-aprovação de permissões com retry** — até 3 tentativas com backoff linear
+  - Extração de permission ID, tool name e description
+  - Tipagem de eventos `permission` (approving / approved / failed / unknown)
+- **Health endpoint com status 503** — retorna degradado quando > 50% dos servidores em erro
+  - Payload inclui array `servers[]` com estado de cada OpenCodeServer (port, status, circuitBreakerUntil)
+  - Melhor observabilidade para load balancers e health checks de produção
+- **Testes: cobertura elevada de ~4% para 85,9%** — 349 testes com Vitest
+  - Meta v1.3 (30%+) **superada** significativamente
+  - 11 arquivos de teste cobrindo camadas críticas: `commands.js`, `config.js`, `rate-limiter.js`, `session-manager.js`, `stream-handler.js`, etc.
+
+### Corrigido
+
+- **B-09**: `_checkTimeouts()` agora aguarda `close()` assincronamente; elimina double-delete do `_sessions`
+- **B-10**: Timer de arquivamento de thread rastreado em `_archiveTimer`; cancelado em `stop()`
+- **B-11**: Try-catch em `createSessionInThread()`; thread órfã arquivada/deletada se `sessionManager.create()` falhar
+
+### Refatorado
+
+- **S-12**: `_handleIdleTransition()` extraído — transição idle→waiting_input/finished centralizada; elimina duplicação entre handlers `session.status` e `session.idle`
+- **S-09**: `getProjects()` agora async com cache em memória (TTL 60 s) — remove bloqueio de `readdirSync` no event loop
+- **S-11**: Limite máximo de portas em `_doAllocatePort()` — erro descritivo se intervalo se esgotar
+
+---
+
 ## [1.2.0] - 2026-03-16
 
 ### Adicionado

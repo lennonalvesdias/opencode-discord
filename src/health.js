@@ -39,6 +39,34 @@ export function startHealthServer({ sessionManager, serverManager, startedAt }) 
 
       res.writeHead(statusCode, { 'Content-Type': 'application/json' });
       res.end(body);
+    } else if (req.method === 'GET' && req.url === '/metrics') {
+      const allSessions = sessionManager.getAll();
+      const byStatus = {};
+      for (const s of allSessions) {
+        byStatus[s.status] = (byStatus[s.status] || 0) + 1;
+      }
+      const active = allSessions.filter(s => !['finished', 'error'].includes(s.status)).length;
+      const servers = serverManager.getAll();
+      const serversByStatus = { ready: 0, error: 0, starting: 0, stopped: 0 };
+      for (const srv of servers) {
+        const sst = srv.status || 'stopped';
+        serversByStatus[sst] = (serversByStatus[sst] || 0) + 1;
+      }
+      const metrics = {
+        uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
+        sessions: {
+          total_created: sessionManager.totalCreated ?? allSessions.length,
+          active,
+          by_status: byStatus
+        },
+        servers: {
+          total: servers.length,
+          ...serversByStatus
+        }
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(metrics, null, 2));
+      return;
     } else {
       res.writeHead(404);
       res.end();

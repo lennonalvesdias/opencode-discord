@@ -18,10 +18,29 @@ import { spawn } from 'node:child_process';
 import { StreamHandler } from './stream-handler.js';
 import { formatAge, debug } from './utils.js';
 import { listOpenCodeCommands } from './opencode-commands.js';
-import { PROJECTS_BASE, ALLOWED_USERS, validateProjectPath, MAX_SESSIONS_PER_USER, ALLOW_SHARED_SESSIONS, MAX_GLOBAL_SESSIONS } from './config.js';
+import { PROJECTS_BASE, ALLOWED_USERS, validateProjectPath, MAX_SESSIONS_PER_USER, ALLOW_SHARED_SESSIONS, MAX_GLOBAL_SESSIONS, AVAILABLE_MODELS, DEFAULT_MODEL, MAX_SESSIONS_PER_PROJECT } from './config.js';
 import { RateLimiter } from './rate-limiter.js';
+import { audit } from './audit.js';
 
 const commandRateLimiter = new RateLimiter({ maxActions: 5, windowMs: 60_000 });
+
+/**
+ * Retorna estatísticas do rate limiter de comandos.
+ * Conta quantos usuários estão atualmente bloqueados na janela de 60 segundos.
+ * @returns {{ blockedLastMinute: number }}
+ */
+export function getRateLimitStats() {
+  const now = Date.now();
+  const cutoff = now - 60_000;
+  let blocked = 0;
+  for (const bucket of commandRateLimiter._buckets.values()) {
+    const recentHits = bucket.timestamps.filter((t) => t > cutoff).length;
+    if (recentHits >= commandRateLimiter.maxActions) {
+      blocked += 1;
+    }
+  }
+  return { blockedLastMinute: blocked };
+}
 
 const STATUS_EMOJI = { running: '⚙️', waiting_input: '💬', finished: '✅', error: '❌', idle: '💤' };
 
@@ -35,6 +54,16 @@ let _projectsCacheTime = 0;
 let _projectsPending = null;
 /** TTL do cache em milissegundos */
 const PROJECTS_CACHE_TTL_MS = 60_000;
+
+/**
+ * Reseta o cache de projetos (usado exclusivamente em testes).
+ * @internal
+ */
+export function _resetProjectsCache() {
+  _projectsCache = null;
+  _projectsCacheTime = 0;
+  _projectsPending = null;
+}
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -86,6 +115,12 @@ export const commandDefinitions = [
     )
     .addStringOption((o) =>
       o.setName('prompt').setDescription('Descrição inicial da tarefa').setRequired(false)
+    )
+    .addStringOption((o) =>
+      o.setName('modelo')
+       .setDescription('Modelo de IA a usar (opcional)')
+       .setAutocomplete(true)
+       .setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -99,6 +134,12 @@ export const commandDefinitions = [
     )
     .addStringOption((o) =>
       o.setName('prompt').setDescription('Descrição do que deve ser desenvolvido').setRequired(false)
+    )
+    .addStringOption((o) =>
+      o.setName('modelo')
+       .setDescription('Modelo de IA a usar (opcional)')
+       .setAutocomplete(true)
+       .setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -139,6 +180,10 @@ export const commandDefinitions = [
   new SlashCommandBuilder()
     .setName('diff')
     .setDescription('Exibe o diff atual do projeto da sessão desta thread'),
+
+  new SlashCommandBuilder()
+    .setName('passthrough')
+    .setDescription('Ativa ou desativa o encaminhamento automático de mensagens para o agente'),
 ].map((c) => c.toJSON());
 
 // ─── Handler de comandos ──────────────────────────────────────────────────────
@@ -179,11 +224,14 @@ export async function handleCommand(interaction, sessionManager) {
     await handleRunCommand(interaction, sessionManager);
   } else if (commandName === 'diff') {
     await handleDiffCommand(interaction, sessionManager);
+  } else if (commandName === 'passthrough') {
+    await handlePassthrough(interaction, sessionManager);
   }
 }
 
 /**
  * Responde a autocomplete de projeto para /plan e /build,
+ * de modelo de IA para /plan e /build,
  * e de nome de comando para /comando
  * @param {import('discord.js').AutocompleteInteraction} interaction
  */
@@ -197,6 +245,16 @@ export async function handleAutocomplete(interaction) {
       await handleCommandoAutocomplete(interaction, focusedOption.value);
     }
     return;
+  }
+
+  // Autocomplete de modelo para /plan e /build
+  if (commandName === 'plan' || commandName === 'build') {
+    const focused = interaction.options.getFocused(true);
+    if (focused.name === 'modelo') {
+      const models = AVAILABLE_MODELS.filter((m) => m.startsWith(focused.value));
+      await interaction.respond(models.slice(0, 25).map((m) => ({ name: m, value: m })));
+      return;
+    }
   }
 
   // Autocomplete de projeto para /plan e /build
@@ -220,6 +278,7 @@ export async function handleAutocomplete(interaction) {
 async function handleStartSession(interaction, sessionManager, mode) {
   let projectName = interaction.options.getString('projeto');
   const promptText = interaction.options.getString('prompt');
+  const modelOption = interaction.options.getString('modelo') || DEFAULT_MODEL;
 
   // S-03: Validações de tamanho de input (antes do defer para respostas ephemeral limpas)
   if (projectName && projectName.length > 256) {
@@ -298,7 +357,10 @@ async function handleStartSession(interaction, sessionManager, mode) {
     projectPath,
     projectName,
     mode,
+    model: modelOption,
   });
+
+  await audit('session.create', { project: projectName, agent: mode, model: modelOption }, interaction.user.id, session.sessionId);
 
   // Se passou um prompt inicial, envia diretamente
   if (promptText) {
@@ -379,6 +441,8 @@ async function handleStop(interaction, sessionManager) {
   if (!session) {
     return replyError(interaction, 'Nenhuma sessão ativa nesta thread.');
   }
+
+  await audit('session.stop', { project: path.basename(session.projectPath) }, interaction.user.id, session.sessionId);
 
   // Botão de confirmação
   const row = new ActionRowBuilder().addComponents(
@@ -486,6 +550,8 @@ async function handleRunCommand(interaction, sessionManager) {
     return replyError(interaction, 'Nenhuma sessão ativa nesta thread. Use `/plan` ou `/build` para iniciar uma.');
   }
 
+  await audit('command.run', { command: commandName, args }, interaction.user.id, session.sessionId);
+
   // Monta a string do comando e envia para a sessão
   const commandText = args.trim() ? `/${commandName} ${args.trim()}` : `/${commandName}`;
 
@@ -505,6 +571,8 @@ async function handleDiffCommand(interaction, sessionManager) {
     await interaction.reply({ content: '❌ Nenhuma sessão ativa nesta thread.', flags: MessageFlags.Ephemeral });
     return;
   }
+
+  await audit('command.diff', { project: path.basename(session.projectPath) }, interaction.user.id, session.sessionId);
 
   await interaction.deferReply();
 
@@ -559,6 +627,27 @@ async function handleDiffCommand(interaction, sessionManager) {
     console.error('[commands] Erro ao enviar diff:', err);
     await interaction.editReply('❌ Erro ao enviar o diff.');
   }
+}
+
+/**
+ * Alterna o modo passthrough da sessão na thread atual.
+ * Quando ativo, mensagens inline do Discord são encaminhadas automaticamente ao agente.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handlePassthrough(interaction, sessionManager) {
+  const session = sessionManager.getByThread(interaction.channelId);
+
+  if (!session) {
+    return replyError(interaction, 'Nenhuma sessão ativa nesta thread.');
+  }
+
+  const enabled = session.togglePassthrough();
+  const content = enabled
+    ? '✅ Passthrough **ativado** — mensagens serão enviadas automaticamente ao agente'
+    : '⏸️ Passthrough **desativado** — use `/comando` para enviar mensagens manualmente';
+
+  await interaction.reply({ content, flags: MessageFlags.Ephemeral });
 }
 
 // ─── Handler de interações (select menus, botões) ─────────────────────────────
@@ -623,6 +712,67 @@ export async function handleInteraction(interaction, sessionManager) {
   if (interaction.customId === 'cancel_stop') {
     await interaction.update({ content: '↩️ Cancelado.', components: [] });
   }
+
+  // ─── Aprovação de Permissão ───────────────────────────────────────────────────
+  const { customId } = interaction;
+
+  if (customId.startsWith('approve_permission_')) {
+    const sessionId = customId.replace('approve_permission_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    try {
+      await session.server.client.confirmPermission(session.apiSessionId);
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`approve_permission_${sessionId}`)
+          .setLabel('Aprovado ✅')
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId(`deny_permission_${sessionId}`)
+          .setLabel('Recusar ❌')
+          .setStyle(ButtonStyle.Danger)
+          .setDisabled(true)
+      );
+      await interaction.update({ components: [row] });
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao aprovar permissão:', err.message);
+      await interaction.reply({ content: '⚠️ Erro ao aprovar permissão.', ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
+
+  if (customId.startsWith('deny_permission_')) {
+    const sessionId = customId.replace('deny_permission_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    try {
+      await session.abort();
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`approve_permission_${sessionId}`)
+          .setLabel('Aprovado ✅')
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId(`deny_permission_${sessionId}`)
+          .setLabel('Recusado ❌')
+          .setStyle(ButtonStyle.Danger)
+          .setDisabled(true)
+      );
+      await interaction.update({ components: [row], content: '❌ Permissão recusada — sessão encerrada.' });
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao recusar permissão:', err.message);
+      await interaction.reply({ content: '⚠️ Erro ao recusar permissão.', ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
 }
 
 // ─── Utilitários ──────────────────────────────────────────────────────────────
@@ -635,9 +785,10 @@ export async function handleInteraction(interaction, sessionManager) {
  * @param {string} opts.projectPath
  * @param {string} opts.projectName
  * @param {'plan'|'build'} opts.mode
+ * @param {string} [opts.model=''] - Modelo de IA a usar (vazio = padrão do opencode)
  * @returns {Promise<{ thread: import('discord.js').ThreadChannel, session: import('./session-manager.js').OpenCodeSession }>}
  */
-async function createSessionInThread({ interaction, sessionManager, projectPath, projectName, mode }) {
+async function createSessionInThread({ interaction, sessionManager, projectPath, projectName, mode, model = '' }) {
   const threadName = `${mode === 'plan' ? '📋 Plan' : '🔨 Build'} · ${projectName} · ${formatTime()}`;
   const channel = interaction.channel ?? await interaction.client.channels.fetch(interaction.channelId);
   const thread = await channel.threads.create({
@@ -653,6 +804,7 @@ async function createSessionInThread({ interaction, sessionManager, projectPath,
       threadId: thread.id,
       userId: interaction.user.id,
       agent: mode,
+      model,
     });
 
     const streamHandler = new StreamHandler(thread, session);

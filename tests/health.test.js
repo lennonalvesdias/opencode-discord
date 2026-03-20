@@ -101,4 +101,28 @@ describe('startHealthServer', () => {
     expect(typeof body.uptime).toBe('number')
     expect(body.uptime).toBeGreaterThanOrEqual(0)
   })
+
+  it('/metrics — retorna métricas com uptime, sessões e servidores', async () => {
+    const mocks = {
+      sessionManager: {
+        getAll: vi.fn().mockReturnValue([{ status: 'running' }, { status: 'finished' }]),
+        totalCreated: 5,
+      },
+      serverManager: {
+        getAll: vi.fn().mockReturnValue([{ status: 'ready', toHealthInfo: () => ({ port: 4100, status: 'ready' }) }]),
+      },
+      startedAt: new Date(),
+    }
+    server = startHealthServer(mocks)
+    await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject) })
+    const { port } = server.address()
+    const { status, body } = await httpGet(`http://127.0.0.1:${port}/metrics`)
+    expect(status).toBe(200)
+    expect(typeof body.uptime_seconds).toBe('number')
+    expect(body.sessions.total_created).toBe(5)
+    expect(body.sessions.active).toBe(1)
+    expect(body.sessions.by_status).toBeDefined()
+    expect(body.servers.total).toBe(1)
+    expect(body.servers.ready).toBe(1)
+  })
 })

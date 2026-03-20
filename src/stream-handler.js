@@ -1,9 +1,9 @@
 // src/stream-handler.js
 // Captura o output do OpenCode e atualiza mensagens Discord em tempo real
 
-import { AttachmentBuilder } from 'discord.js';
+import { AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { debug } from './utils.js';
-import { STREAM_UPDATE_INTERVAL as UPDATE_INTERVAL, DISCORD_MSG_LIMIT as MSG_LIMIT, ENABLE_DM_NOTIFICATIONS, STATUS_QUEUE_ITEM_TIMEOUT_MS, THREAD_ARCHIVE_DELAY_MS } from './config.js';
+import { STREAM_UPDATE_INTERVAL as UPDATE_INTERVAL, DISCORD_MSG_LIMIT as MSG_LIMIT, ENABLE_DM_NOTIFICATIONS, STATUS_QUEUE_ITEM_TIMEOUT_MS, THREAD_ARCHIVE_DELAY_MS, PERMISSION_TIMEOUT_MS } from './config.js';
 
 /** Limite para enviar diff inline vs como arquivo anexo */
 const DIFF_INLINE_LIMIT = 1500;
@@ -34,6 +34,8 @@ export class StreamHandler {
     this._archiveTimer = null;
     // Flag para saber se já houve output (evita "Processando" redundante)
     this.hasOutput = false;
+    // Estado da permissão interativa pendente (null = nenhuma aguardando)
+    this._pendingPermission = null;
   }
 
   /**
@@ -97,22 +99,10 @@ export class StreamHandler {
       // status 'error' já tratado via listener 'status'
     });
 
-    // Notifica a thread quando uma permissão é solicitada ou aprovada
-    this.session.on('permission', ({ status, toolName, description, error }) => {
-      let msg;
-      if (status === 'approving') {
-        msg = `🔐 **Permissão solicitada** para \`${toolName}\`${description ? ` — ${description}` : ''}\nAprovando automaticamente...`;
-      } else if (status === 'approved') {
-        msg = `✅ **Permissão aprovada** para \`${toolName}\``;
-      } else if (status === 'failed') {
-        msg = `❌ **Falha ao aprovar permissão** para \`${toolName}\`: ${error}`;
-      } else {
-        // status === 'unknown'
-        msg = `⚠️ **Permissão solicitada** (não foi possível identificar a ferramenta)${error ? `: ${error}` : ''}`;
-      }
-
-      this.thread.send(msg).catch((err) =>
-        console.error('[StreamHandler] Erro ao enviar mensagem de permissão:', err.message)
+    // Gerencia pedidos de permissão interativos com botões Aprovar/Recusar
+    this.session.on('permission', (event) => {
+      this._handlePermissionEvent(event).catch((err) =>
+        console.error('[StreamHandler] Erro ao processar evento de permissão:', err.message)
       );
     });
 
@@ -347,6 +337,114 @@ export class StreamHandler {
       clearTimeout(this._archiveTimer);
       this._archiveTimer = null;
     }
+    this._clearPendingPermission();
+  }
+
+  /**
+   * Gerencia eventos de permissão: exibe botões Aprovar/Recusar ou aviso inline.
+   * Para `status === 'requested'`, envia mensagem com botões e inicia timer de 60s.
+   * Para `status === 'unknown'`, envia aviso simples sem botões.
+   * @param {{ status: string, permissionId?: string, toolName?: string, description?: string, error?: string }} event
+   */
+  async _handlePermissionEvent({ status, permissionId, toolName, description, error }) {
+    if (status === 'requested') {
+      // Cancela permissão pendente anterior se existir (pode ocorrer em rajadas)
+      this._clearPendingPermission();
+
+      const toolLabel = toolName ?? 'ferramenta';
+      const descLine = description ? `\n> ${description}` : '';
+      const content =
+        `🔐 **Permissão solicitada** para \`${toolLabel}\`${descLine}\n\n` +
+        `Aprove ou recuse em até **60 segundos**. Sem resposta, será aprovada automaticamente.`;
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`approve_permission_${this.session.sessionId}`)
+          .setLabel('Aprovar')
+          .setStyle(ButtonStyle.Success)
+          .setEmoji('✅'),
+        new ButtonBuilder()
+          .setCustomId(`deny_permission_${this.session.sessionId}`)
+          .setLabel('Recusar')
+          .setStyle(ButtonStyle.Danger)
+          .setEmoji('❌'),
+      );
+
+      let permMsg;
+      try {
+        permMsg = await this.thread.send({ content, components: [row] });
+      } catch (sendErr) {
+        console.error('[StreamHandler] Erro ao enviar mensagem de permissão:', sendErr.message);
+        return;
+      }
+
+      // Auto-aprova após PERMISSION_TIMEOUT_MS se o usuário não interagir
+      const timeout = setTimeout(async () => {
+        if (!this._pendingPermission) return; // Usuário já interagiu
+
+        const pending = this._pendingPermission;
+        this._pendingPermission = null;
+
+        // Verifica novamente se o usuário interagiu (race condition)
+        if (!this.session._pendingPermissionId) {
+          debug('StreamHandler', '⏰ Timeout de permissão disparado, mas usuário já interagiu');
+          return;
+        }
+
+        this.session._pendingPermissionId = null;
+
+        // Desabilita botões antes de aprovar
+        const disabledRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`approve_permission_${this.session.sessionId}`)
+            .setLabel('Aprovar')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('✅')
+            .setDisabled(true),
+          new ButtonBuilder()
+            .setCustomId(`deny_permission_${this.session.sessionId}`)
+            .setLabel('Recusar')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('❌')
+            .setDisabled(true),
+        );
+
+        try {
+          await pending.message.edit({
+            content: `${content}\n\n⏰ *Aprovado automaticamente por timeout.*`,
+            components: [disabledRow],
+          });
+        } catch (editErr) {
+          debug('StreamHandler', '⚠️ Erro ao editar mensagem de permissão no timeout: %s', editErr.message);
+        }
+
+        if (!this.session.server?.client) return;
+        try {
+          await this.session.server.client.approvePermission(this.session.apiSessionId, pending.permissionId);
+          debug('StreamHandler', '⏰ Permissão auto-aprovada após timeout: %s', pending.permissionId);
+        } catch (approveErr) {
+          console.error('[StreamHandler] ❌ Erro ao auto-aprovar permissão no timeout:', approveErr.message);
+        }
+      }, PERMISSION_TIMEOUT_MS);
+
+      this._pendingPermission = { permissionId, message: permMsg, timeout };
+    } else if (status === 'unknown') {
+      this.thread
+        .send(`⚠️ **Permissão solicitada** (não foi possível identificar a ferramenta)${error ? `: ${error}` : ''}`)
+        .catch((sendErr) =>
+          console.error('[StreamHandler] Erro ao enviar aviso de permissão:', sendErr.message)
+        );
+    }
+    // Outros status ('approving', 'approved', 'failed') não são emitidos no novo fluxo interativo
+  }
+
+  /**
+   * Cancela a permissão pendente atual, limpando o timer e o estado.
+   */
+  _clearPendingPermission() {
+    if (!this._pendingPermission) return;
+    clearTimeout(this._pendingPermission.timeout);
+    this._pendingPermission = null;
   }
 }
 

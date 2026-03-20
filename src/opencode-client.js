@@ -25,10 +25,11 @@ export class OpenCodeClient {
 
   /**
    * Cria uma nova sessão na API do opencode.
+   * @param {object} [opts={}] - Opções de criação (ex: `{ model: 'anthropic/claude-sonnet-4-5' }`)
    * @returns {Promise<{ id: string }>} Objeto de sessão contendo o campo `id`
    */
-  async createSession() {
-    const response = await this._fetch('/session', { method: 'POST', body: '{}' });
+  async createSession(opts = {}) {
+    const response = await this._fetch('/session', { method: 'POST', body: JSON.stringify(opts) });
     if (!response.ok) {
       const body = await response.text();
       throw new Error(`POST /session falhou: ${response.status} ${body}`);

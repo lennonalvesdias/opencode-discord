@@ -18,6 +18,7 @@ import { formatAge, debug } from './utils.js';
 import { ALLOWED_USERS, ALLOW_SHARED_SESSIONS, CHANNEL_FETCH_TIMEOUT_MS, SHUTDOWN_TIMEOUT_MS } from './config.js';
 import { startHealthServer } from './health.js';
 import { loadSessions, removeSession } from './persistence.js';
+import { initAudit, audit } from './audit.js';
 
 // ─── Validação de configuração ────────────────────────────────────────────────
 
@@ -100,6 +101,7 @@ client.once('clientReady', async (c) => {
   console.log(`\n🤖 Bot online: ${c.user.tag}`);
   console.log(`📁 Projetos: ${process.env.PROJECTS_BASE_PATH}`);
   console.log(`🔧 OpenCode: ${process.env.OPENCODE_BIN || 'opencode'}\n`);
+  await initAudit();
   await registerCommands();
   startHealthServer({ sessionManager, serverManager, startedAt: Date.now() });
 });
@@ -181,10 +183,17 @@ client.on('messageCreate', async (message) => {
   // Envia o input para o processo OpenCode
   debug('Bot', `💬 mensagem na thread | threadId=${message.channel.id} | user=${message.author.tag} | texto=${JSON.stringify(text.slice(0, 80))}`);
   debug('Bot', `🔗 sessão encontrada | sessionId=${session.sessionId} | status=${session.status}`);
+
+  // Verifica se o passthrough está ativo — se desativado, ignora mensagens inline
+  if (!session.passthroughEnabled) {
+    debug('Bot', '⏸️ Passthrough desativado — mensagem ignorada na thread %s', message.channel.id);
+    return;
+  }
+
   try {
-    await session.sendMessage(text);
+    await session.queueMessage(text);
   } catch (err) {
-    debug('index', '❌ Erro ao enviar mensagem:', err.message);
+    debug('index', '❌ Erro ao enfileirar mensagem:', err.message);
     await message.reply('⚠️ O processo OpenCode não está ativo nesta sessão. Use `/plan` ou `/build` para iniciar uma nova.').catch(() => {});
     return;
   }
@@ -197,6 +206,8 @@ client.on('messageCreate', async (message) => {
   } catch (reactErr) {
     debug('Bot', '⚠️ Erro ao reagir à mensagem: %s', reactErr.message);
   }
+
+  await audit('message.passthrough', { text: text.slice(0, 100) }, message.author.id, session.sessionId);
 });
 
 // ─── Graceful shutdown ─────────────────────────────────────────────────────────

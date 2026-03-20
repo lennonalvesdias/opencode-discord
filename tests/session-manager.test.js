@@ -816,4 +816,52 @@ describe('SessionManager', () => {
   it('destroy() com sessionId inexistente não lança erro', async () => {
     await expect(sm.destroy('sessao-que-nao-existe')).resolves.toBeUndefined()
   })
+
+  // ─── queueMessage ──────────────────────────────────────────────────────────
+
+  it('queueMessage() envia imediatamente quando status é idle', async () => {
+    const sess = await sm.create({ projectPath: '/projetos/queue-idle', threadId: 'thread-qi', userId: 'user-qi', agent: 'coder' })
+    client.sendMessage.mockClear()
+    await sess.queueMessage('olá agente')
+    expect(client.sendMessage).toHaveBeenCalledWith('api-sess-1', 'coder', 'olá agente')
+    expect(sess._messageQueue).toHaveLength(0)
+  })
+
+  it('queueMessage() enfileira sem enviar quando status é running', async () => {
+    const sess = await sm.create({ projectPath: '/projetos/queue-running', threadId: 'thread-qr', userId: 'user-qr', agent: 'coder' })
+    sess.status = 'running'
+    client.sendMessage.mockClear()
+    await sess.queueMessage('mensagem enfileirada')
+    expect(client.sendMessage).not.toHaveBeenCalled()
+    expect(sess._messageQueue).toHaveLength(1)
+  })
+
+  // ─── togglePassthrough ─────────────────────────────────────────────────────
+
+  it('togglePassthrough() inverte passthroughEnabled e retorna novo valor', () => {
+    const sess = new OpenCodeSession({ sessionId: 'sess-pt', projectPath: '/projetos/pt', threadId: 'thread-pt', userId: 'user-pt', agent: 'coder' })
+    expect(sess.passthroughEnabled).toBe(true)
+    const result = sess.togglePassthrough()
+    expect(result).toBe(false)
+    expect(sess.passthroughEnabled).toBe(false)
+    const result2 = sess.togglePassthrough()
+    expect(result2).toBe(true)
+  })
+
+  // ─── totalCreated ──────────────────────────────────────────────────────────
+
+  it('totalCreated começa em 0 e incrementa a cada create()', async () => {
+    expect(sm.totalCreated).toBe(0)
+    await sm.create({ projectPath: '/projetos/tc-1', threadId: 'thread-tc1', userId: 'user-tc1', agent: 'coder' })
+    expect(sm.totalCreated).toBe(1)
+    await sm.create({ projectPath: '/projetos/tc-2', threadId: 'thread-tc2', userId: 'user-tc2', agent: 'coder' })
+    expect(sm.totalCreated).toBe(2)
+  })
+
+  // ─── create com model ──────────────────────────────────────────────────────
+
+  it('create() com opção model define session.model corretamente', async () => {
+    const sess = await sm.create({ projectPath: '/projetos/model-test', threadId: 'thread-mdl', userId: 'user-mdl', agent: 'coder', model: 'openai/gpt-4o' })
+    expect(sess.model).toBe('openai/gpt-4o')
+  })
 })

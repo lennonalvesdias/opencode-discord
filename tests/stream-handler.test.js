@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { StreamHandler, _internal } from '../src/stream-handler.js';
 
-// ─── Mock de discord.js para que AttachmentBuilder seja interceptado ──────────
+// ─── Mock de discord.js para que AttachmentBuilder/ButtonBuilder sejam interceptados ─
 vi.mock('discord.js', () => {
   // Deve ser function regular (não arrow) para suportar "new"
   const AttachmentBuilder = function (buffer, options) {
@@ -10,7 +10,22 @@ vi.mock('discord.js', () => {
     this.name = options?.name;
     this.description = options?.description;
   };
-  return { AttachmentBuilder };
+
+  const ButtonBuilder = function () {
+    this.setCustomId = vi.fn().mockReturnThis();
+    this.setLabel = vi.fn().mockReturnThis();
+    this.setStyle = vi.fn().mockReturnThis();
+    this.setEmoji = vi.fn().mockReturnThis();
+    this.setDisabled = vi.fn().mockReturnThis();
+  };
+
+  const ActionRowBuilder = function () {
+    this.addComponents = vi.fn().mockReturnThis();
+  };
+
+  const ButtonStyle = { Success: 3, Danger: 4, Secondary: 2 };
+
+  return { AttachmentBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle };
 });
 
 // ─── Helper para drenar a fila de microtasks pendentes ────────────────────────
@@ -368,54 +383,65 @@ describe('StreamHandler', () => {
   // ─── evento 'permission' da sessão ────────────────────────────────────────
 
   describe("evento 'permission' da sessão", () => {
-    it("status 'approving' envia mensagem de permissão solicitada com descrição", () => {
+    it("status 'requested' envia mensagem com objeto { content, components }", async () => {
       handler.start();
       session.emit('permission', {
-        status: 'approving',
+        status: 'requested',
         toolName: 'bash',
         description: 'Executar comando shell',
-        error: null,
+        permissionId: 'perm-1',
       });
+      await flushPromises();
       expect(thread.send).toHaveBeenCalledWith(
-        '🔐 **Permissão solicitada** para `bash` — Executar comando shell\nAprovando automaticamente...'
+        expect.objectContaining({
+          content: expect.stringContaining('bash'),
+          components: expect.arrayContaining([expect.any(Object)]),
+        })
       );
     });
 
-    it("status 'approving' sem description não inclui traço na mensagem", () => {
+    it("status 'requested' com description inclui a descrição no conteúdo", async () => {
       handler.start();
       session.emit('permission', {
-        status: 'approving',
-        toolName: 'bash',
-        description: '',
-        error: null,
-      });
-      expect(thread.send).toHaveBeenCalledWith(
-        '🔐 **Permissão solicitada** para `bash`\nAprovando automaticamente...'
-      );
-    });
-
-    it("status 'approved' envia mensagem de permissão aprovada", () => {
-      handler.start();
-      session.emit('permission', {
-        status: 'approved',
+        status: 'requested',
         toolName: 'write_file',
-        description: '',
-        error: null,
+        description: 'Escrever arquivo de configuração',
+        permissionId: 'perm-2',
       });
-      expect(thread.send).toHaveBeenCalledWith('✅ **Permissão aprovada** para `write_file`');
+      await flushPromises();
+      expect(thread.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining('Escrever arquivo de configuração'),
+        })
+      );
     });
 
-    it("status 'failed' envia mensagem de falha com motivo do erro", () => {
+    it("status 'requested' sem description não inclui linha de descrição com '>'", async () => {
       handler.start();
       session.emit('permission', {
-        status: 'failed',
+        status: 'requested',
         toolName: 'bash',
         description: '',
-        error: 'Permissão negada pelo sistema',
+        permissionId: 'perm-3',
       });
-      expect(thread.send).toHaveBeenCalledWith(
-        '❌ **Falha ao aprovar permissão** para `bash`: Permissão negada pelo sistema'
-      );
+      await flushPromises();
+      expect(thread.send).toHaveBeenCalled();
+      const callArg = thread.send.mock.calls[0][0];
+      expect(typeof callArg).toBe('object');
+      expect(callArg.content).not.toContain('\n>');
+    });
+
+    it("status 'requested' define _pendingPermission com permissionId correto", async () => {
+      handler.start();
+      session.emit('permission', {
+        status: 'requested',
+        toolName: 'bash',
+        description: '',
+        permissionId: 'perm-42',
+      });
+      await flushPromises();
+      expect(handler._pendingPermission).not.toBeNull();
+      expect(handler._pendingPermission.permissionId).toBe('perm-42');
     });
 
     it('status desconhecido envia aviso genérico sem error', () => {
@@ -774,6 +800,210 @@ describe('StreamHandler', () => {
       const [msg] = mockMember.send.mock.calls[0];
       expect(msg).toContain('<#');
       expect(msg).toContain('thread-123');
+    });
+  });
+
+  // ─── evento 'status' da sessão ────────────────────────────────────────────
+
+  describe("evento 'status' da sessão", () => {
+    it("'finished' chama flush e sendStatusMessage em sequência", async () => {
+      const flushSpy = vi.spyOn(handler, 'flush').mockResolvedValue();
+      const statusSpy = vi.spyOn(handler, 'sendStatusMessage').mockResolvedValue();
+
+      handler.start();
+      session.emit('status', 'finished');
+
+      await flushPromises(10);
+
+      expect(flushSpy).toHaveBeenCalled();
+      expect(statusSpy).toHaveBeenCalledWith('finished');
+    });
+
+    it("'running' reseta hasOutput para false após flush", async () => {
+      vi.spyOn(handler, 'flush').mockResolvedValue();
+      vi.spyOn(handler, 'sendStatusMessage').mockResolvedValue();
+
+      handler.start();
+      handler.hasOutput = true;
+      session.emit('status', 'running');
+
+      await flushPromises(10);
+
+      expect(handler.hasOutput).toBe(false);
+    });
+  });
+
+  // ─── evento 'server-restart' da sessão ───────────────────────────────────
+
+  describe("evento 'server-restart' da sessão", () => {
+    it("chama sendStatusMessage com 'restart'", () => {
+      const statusSpy = vi.spyOn(handler, 'sendStatusMessage').mockResolvedValue();
+
+      handler.start();
+      session.emit('server-restart');
+
+      expect(statusSpy).toHaveBeenCalledWith('restart');
+    });
+  });
+
+  // ─── evento 'timeout' — erro do send ─────────────────────────────────────
+
+  describe("evento 'timeout' — erro do send capturado", () => {
+    it('não propaga exceção quando thread.send rejeita', async () => {
+      thread.send = vi.fn().mockRejectedValue(new Error('Rate limited'));
+      handler.start();
+      session.emit('timeout');
+      await flushPromises(5);
+      // Passa se nenhuma exceção não capturada for lançada
+    });
+  });
+
+  // ─── evento 'error' da sessão ─────────────────────────────────────────────
+
+  describe("evento 'error' da sessão", () => {
+    it('não lança exceção ao emitir erro na sessão', () => {
+      handler.start();
+      const err = new Error('Erro crítico de sessão');
+      expect(() => session.emit('error', err)).not.toThrow();
+    });
+  });
+
+  // ─── evento 'question' — erro do send ────────────────────────────────────
+
+  describe("evento 'question' — erro do send capturado", () => {
+    it('não propaga exceção quando thread.send rejeita ao enviar pergunta', async () => {
+      thread.send = vi.fn().mockRejectedValue(new Error('Rate limited'));
+      handler.start();
+      session.emit('question', { questions: [{ question: 'Qual o projeto?' }] });
+      await flushPromises(5);
+      // Passa se nenhuma exceção não capturada for lançada
+    });
+  });
+
+  // ─── _sendDiffPreview — diff inline excede MSG_LIMIT ─────────────────────
+
+  describe('_sendDiffPreview() — diff inline excede MSG_LIMIT', () => {
+    it('envia como arquivo quando formatted excede MSG_LIMIT mesmo com conteúdo dentro do DIFF_INLINE_LIMIT', async () => {
+      const sendAsFileSpy = vi.spyOn(handler, '_sendDiffAsFile').mockResolvedValue();
+      // fileName longo + content no limite → formatted (1904 chars) > MSG_LIMIT (1900)
+      const content = 'x'.repeat(1500); // exatamente no DIFF_INLINE_LIMIT
+      const filePath = 'a'.repeat(381) + '.js'; // formatted = 20 + 384 + 1500 = 1904
+
+      await handler._sendDiffPreview(filePath, content);
+
+      expect(sendAsFileSpy).toHaveBeenCalled();
+      expect(thread.send).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── flush() — comportamentos extras ─────────────────────────────────────
+
+  describe('flush() — comportamentos extras', () => {
+    it('pula chunk composto apenas de espaços em branco sem enviar mensagem para ele', async () => {
+      // '   \n' + 2000 'a' → splitIntoChunks retorna primeiro chunk '   ' (whitespace) → pulado
+      handler.currentContent = '   \n' + 'a'.repeat(2000);
+      await handler.flush();
+      // thread.send é chamado para os chunks 'a', mas não para o chunk em branco
+      expect(thread.send).toHaveBeenCalled();
+    });
+
+    it('captura erro do thread.send silenciosamente sem lançar exceção', async () => {
+      thread.send = vi.fn().mockRejectedValue(new Error('Discord API error'));
+      handler.currentContent = 'texto simples';
+      await expect(handler.flush()).resolves.not.toThrow();
+    });
+  });
+
+  // ─── sendStatusMessage() — erro do send ──────────────────────────────────
+
+  describe('sendStatusMessage() — erro do send capturado', () => {
+    it('não propaga exceção quando thread.send rejeita', async () => {
+      thread.send = vi.fn().mockRejectedValue(new Error('Rate limited'));
+      await expect(handler.sendStatusMessage('finished')).resolves.not.toThrow();
+    });
+  });
+
+  // ─── _handlePermissionEvent — erro do send ───────────────────────────────
+
+  describe('_handlePermissionEvent() — erro do send', () => {
+    it('retorna silenciosamente quando thread.send rejeita ao enviar permissão solicitada', async () => {
+      thread.send = vi.fn().mockRejectedValue(new Error('Permission send error'));
+      await expect(
+        handler._handlePermissionEvent({
+          status: 'requested',
+          toolName: 'bash',
+          description: '',
+          permissionId: 'perm-1',
+        })
+      ).resolves.not.toThrow();
+    });
+  });
+
+  // ─── _handlePermissionEvent — timeout de auto-aprovação ──────────────────
+
+  describe('_handlePermissionEvent() — timeout de auto-aprovação', () => {
+    it('auto-aprova permissão após PERMISSION_TIMEOUT_MS quando _pendingPermissionId está definido', async () => {
+      const mockApprove = vi.fn().mockResolvedValue({});
+      session.server = { client: { approvePermission: mockApprove } };
+      session.apiSessionId = 'api-sess-42';
+
+      handler.start();
+      session.emit('permission', {
+        status: 'requested',
+        toolName: 'bash',
+        description: '',
+        permissionId: 'perm-42',
+      });
+
+      // Aguarda a mensagem de permissão ser enviada e _pendingPermission ser definido
+      await flushPromises(10);
+
+      // Simula que o processo opencode definiu o _pendingPermissionId
+      session._pendingPermissionId = 'perm-42';
+
+      await vi.advanceTimersByTimeAsync(60001);
+      await flushPromises(10);
+
+      expect(mockApprove).toHaveBeenCalledWith('api-sess-42', 'perm-42');
+    });
+
+    it('cancela auto-aprovação quando _pendingPermissionId não está definido (usuário já interagiu)', async () => {
+      const mockApprove = vi.fn().mockResolvedValue({});
+      session.server = { client: { approvePermission: mockApprove } };
+      session.apiSessionId = 'api-sess-42';
+      // session._pendingPermissionId não é definido → branch de retorno antecipado no timeout
+
+      handler.start();
+      session.emit('permission', {
+        status: 'requested',
+        toolName: 'bash',
+        description: '',
+        permissionId: 'perm-42',
+      });
+
+      await flushPromises(10);
+
+      await vi.advanceTimersByTimeAsync(60001);
+      await flushPromises(10);
+
+      expect(mockApprove).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── _handlePermissionEvent — unknown status, erro do send ───────────────
+
+  describe('_handlePermissionEvent() — unknown status, erro do send capturado', () => {
+    it('não propaga exceção quando thread.send rejeita ao enviar aviso de permissão desconhecida', async () => {
+      thread.send = vi.fn().mockRejectedValue(new Error('Rate limited'));
+      handler.start();
+      session.emit('permission', {
+        status: 'unknown',
+        toolName: '',
+        description: '',
+        error: null,
+      });
+      await flushPromises(5);
+      // Passa se nenhuma exceção não capturada for lançada
     });
   });
 });

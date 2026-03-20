@@ -60,14 +60,16 @@ class OpenCodeSession extends EventEmitter {
    * @param {string} opts.threadId - ID da thread Discord associada
    * @param {string} opts.userId - ID do usuário Discord que iniciou a sessão
    * @param {'plan'|'build'} opts.agent - Agente a ser utilizado
+   * @param {string} [opts.model=''] - Modelo de IA a usar (vazio = padrão do opencode)
    */
-  constructor({ sessionId, projectPath, threadId, userId, agent }) {
+  constructor({ sessionId, projectPath, threadId, userId, agent, model = '' }) {
     super();
     this.sessionId = sessionId;
     this.projectPath = projectPath;
     this.threadId = threadId;
     this.userId = userId;
     this.agent = agent;
+    this.model = model;
     this.status = 'idle';
     this.apiSessionId = null;
     this.server = null;
@@ -79,6 +81,14 @@ class OpenCodeSession extends EventEmitter {
     this.lastActivityAt = new Date();
     this.closedAt = null;
     this._pendingTimeouts = [];
+    /** @type {string[]} Fila de mensagens aguardando envio */
+    this._messageQueue = [];
+    /** @type {boolean} Indica se a fila está sendo drenada no momento */
+    this._processingQueue = false;
+    /** @type {boolean} Encaminha mensagens inline automaticamente ao agente */
+    this.passthroughEnabled = true;
+    /** ID da permissão aguardando aprovação interativa do usuário (null = nenhuma pendente) */
+    this._pendingPermissionId = null;
   }
 
   /**
@@ -91,7 +101,9 @@ class OpenCodeSession extends EventEmitter {
 
     this.server = await serverManager.getOrCreate(this.projectPath);
 
-    const apiSession = await this.server.client.createSession();
+    const apiSession = await this.server.client.createSession(
+      this.model ? { model: this.model } : {}
+    );
     this.apiSessionId = apiSession.id;
 
     this.server.registerSession(this.apiSessionId, this);
@@ -143,6 +155,57 @@ class OpenCodeSession extends EventEmitter {
   }
 
   /**
+   * Enfileira uma mensagem para envio quando a sessão estiver pronta.
+   * Se a sessão estiver idle/waiting_input, envia imediatamente.
+   * Se estiver running, enfileira para enviar quando ficar idle.
+   * @param {string} text - Texto a enviar
+   */
+  async queueMessage(text) {
+    if (this.status === 'finished' || this.status === 'error') {
+      throw new Error('Sessão encerrada');
+    }
+    this._messageQueue.push(text);
+    await this._drainMessageQueue();
+  }
+
+  /**
+   * Drena a fila de mensagens pendentes, enviando uma por vez.
+   * Retorna imediatamente se a fila já está sendo processada ou se a sessão
+   * está em execução (aguardando o agente terminar).
+   * @private
+   */
+  async _drainMessageQueue() {
+    if (this._processingQueue) return;
+    if (this.status === 'running') return;
+    if (this._messageQueue.length === 0) return;
+
+    this._processingQueue = true;
+    try {
+      while (this._messageQueue.length > 0 && this.status !== 'running') {
+        const text = this._messageQueue.shift();
+        await this.sendMessage(text);
+        // Pausa entre mensagens consecutivas para evitar spam
+        if (this._messageQueue.length > 0 && this.status !== 'running') {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      }
+    } finally {
+      this._processingQueue = false;
+    }
+  }
+
+  /**
+   * Alterna o modo passthrough da sessão.
+   * Quando ativo, mensagens inline do Discord são encaminhadas automaticamente ao agente.
+   * @returns {boolean} Novo estado do passthrough
+   */
+  togglePassthrough() {
+    this.passthroughEnabled = !this.passthroughEnabled;
+    debug('OpenCodeSession', '🔀 Passthrough %s: %s', this.passthroughEnabled ? 'ativado' : 'desativado', this.sessionId);
+    return this.passthroughEnabled;
+  }
+
+  /**
    * Encerra a sessão, remove o registro no servidor e emite os eventos finais.
    */
   async close() {
@@ -151,6 +214,7 @@ class OpenCodeSession extends EventEmitter {
       clearTimeout(tid);
     }
     this._pendingTimeouts = [];
+    this._pendingPermissionId = null;
 
     if (this.apiSessionId && this.server) {
       try {
@@ -258,32 +322,9 @@ class OpenCodeSession extends EventEmitter {
           break;
         }
 
-        // Notifica o Discord antes de tentar aprovar
-        this.emit('permission', { status: 'approving', permissionId, toolName, description });
-
-        // Tenta aprovar com retry (até 3 tentativas)
-        const tryApprove = async (attempt = 1) => {
-          try {
-            await this.server.client.approvePermission(this.apiSessionId, permissionId);
-            debug('OpenCodeSession', '✅ Permissão aprovada: %s (tentativa %d)', permissionId, attempt);
-            this.emit('permission', { status: 'approved', permissionId, toolName, description });
-          } catch (err) {
-            console.error(`[OpenCodeSession] ❌ Erro ao aprovar permissão (tentativa ${attempt}):`, err.message);
-            if (attempt < 3) {
-              const tid = setTimeout(() => {
-                const idx = this._pendingTimeouts.indexOf(tid);
-                if (idx !== -1) this._pendingTimeouts.splice(idx, 1);
-                tryApprove(attempt + 1);
-              }, 1000 * attempt);
-              this._pendingTimeouts.push(tid);
-            } else {
-              console.error('[OpenCodeSession] ❌ Falha definitiva ao aprovar permissão:', permissionId);
-              this.emit('permission', { status: 'failed', permissionId, toolName, description, error: err.message });
-            }
-          }
-        };
-
-        tryApprove();
+        // Armazena ID da permissão e notifica o Discord para exibir botões interativos
+        this._pendingPermissionId = permissionId;
+        this.emit('permission', { status: 'requested', permissionId, toolName, description });
         break;
       }
 
@@ -335,6 +376,7 @@ class OpenCodeSession extends EventEmitter {
   /**
    * Centraliza a lógica de transição de estado ao receber sinal idle do servidor.
    * Determina se a sessão deve ir para `waiting_input` ou `finished`.
+   * Após a transição, drena a fila de mensagens pendentes.
    * @private
    */
   _handleIdleTransition() {
@@ -347,6 +389,10 @@ class OpenCodeSession extends EventEmitter {
         this.status = 'idle';
         this.emit('status', 'finished');
       }
+      // Sessão saiu de `running` — processa mensagens enfileiradas
+      this._drainMessageQueue().catch((err) => {
+        console.error('[OpenCodeSession] ⚠️ Erro ao drenar fila de mensagens:', err.message);
+      });
     } else if (this.status === 'waiting_input') {
       // Servidor sinalizou idle novamente — sessão realmente concluída
       this.status = 'idle';
@@ -401,6 +447,8 @@ class SessionManager {
     this._sessions = new Map();
     /** @type {Map<string, string>} */
     this._threadIndex = new Map();
+    /** Contador total de sessões criadas desde o início do processo */
+    this.totalCreated = 0;
 
     // Verificação periódica de sessões expiradas
     if (SESSION_TIMEOUT_MS > 0) {
@@ -419,14 +467,16 @@ class SessionManager {
    * @param {string} opts.threadId - ID da thread Discord
    * @param {string} opts.userId - ID do usuário Discord
    * @param {'plan'|'build'} opts.agent - Agente a ser utilizado
+   * @param {string} [opts.model=''] - Modelo de IA a usar (vazio = padrão do opencode)
    * @returns {Promise<OpenCodeSession>}
    */
-  async create({ projectPath, threadId, userId, agent }) {
+  async create({ projectPath, threadId, userId, agent, model = '' }) {
     const sessionId = randomUUID();
-    const session = new OpenCodeSession({ sessionId, projectPath, threadId, userId, agent });
+    const session = new OpenCodeSession({ sessionId, projectPath, threadId, userId, agent, model });
 
     this._sessions.set(sessionId, session);
     this._threadIndex.set(threadId, sessionId);
+    this.totalCreated += 1;
 
     session.once('close', () => {
       // Remove do índice de threads imediatamente para evitar duplicação

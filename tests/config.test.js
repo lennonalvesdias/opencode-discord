@@ -285,4 +285,57 @@ describe('constantes de configuração — valores padrão e env', () => {
     expect(result.valid).toBe(false);
     expect(result.error).toContain('inválido');
   });
+
+  // ─── AVAILABLE_MODELS ───────────────────────────────────────────────────────
+
+  it('AVAILABLE_MODELS contém anthropic/claude-sonnet-4-5 por padrão', async () => {
+    vi.stubEnv('AVAILABLE_MODELS', '');
+    const { AVAILABLE_MODELS } = await import('../src/config.js');
+    expect(AVAILABLE_MODELS).toContain('anthropic/claude-sonnet-4-5');
+  });
+
+  it('AVAILABLE_MODELS divide env var separada por vírgula', async () => {
+    vi.stubEnv('AVAILABLE_MODELS', 'modelo-a,modelo-b');
+    const { AVAILABLE_MODELS } = await import('../src/config.js');
+    expect(AVAILABLE_MODELS).toEqual(['modelo-a', 'modelo-b']);
+  });
+
+  // ─── DEFAULT_MODEL ──────────────────────────────────────────────────────────
+
+  it('DEFAULT_MODEL usa string vazia como padrão', async () => {
+    vi.stubEnv('DEFAULT_MODEL', '');
+    const { DEFAULT_MODEL } = await import('../src/config.js');
+    expect(DEFAULT_MODEL).toBe('');
+  });
+
+  it('DEFAULT_MODEL lê da variável de ambiente', async () => {
+    vi.stubEnv('DEFAULT_MODEL', 'openai/gpt-4o');
+    const { DEFAULT_MODEL } = await import('../src/config.js');
+    expect(DEFAULT_MODEL).toBe('openai/gpt-4o');
+  });
+
+  // ─── PERMISSION_TIMEOUT_MS ──────────────────────────────────────────────────
+
+  it('PERMISSION_TIMEOUT_MS usa 60000 como padrão', async () => {
+    vi.stubEnv('PERMISSION_TIMEOUT_MS', '');
+    const { PERMISSION_TIMEOUT_MS } = await import('../src/config.js');
+    expect(PERMISSION_TIMEOUT_MS).toBe(60000);
+  });
+
+  // ─── MAX_SESSIONS_PER_PROJECT ───────────────────────────────────────────────
+
+  it('MAX_SESSIONS_PER_PROJECT usa 2 como padrão', async () => {
+    vi.stubEnv('MAX_SESSIONS_PER_PROJECT', '');
+    const { MAX_SESSIONS_PER_PROJECT } = await import('../src/config.js');
+    expect(MAX_SESSIONS_PER_PROJECT).toBe(2);
+  });
+
+  // ─── AUDIT_LOG_PATH ─────────────────────────────────────────────────────────
+
+  it('AUDIT_LOG_PATH padrão contém .opencode-discord e audit.ndjson', async () => {
+    vi.stubEnv('AUDIT_LOG_PATH', '');
+    const { AUDIT_LOG_PATH } = await import('../src/config.js');
+    expect(AUDIT_LOG_PATH).toContain('.opencode-discord');
+    expect(AUDIT_LOG_PATH).toContain('audit.ndjson');
+  });
 });
