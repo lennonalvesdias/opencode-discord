@@ -36,6 +36,7 @@ export class StreamHandler {
     this.hasOutput = false;
     // Estado da permissão interativa pendente (null = nenhuma aguardando)
     this._pendingPermission = null;
+    this.sentMessages = []; // mensagens anteriores para correção de tabelas no final
   }
 
   /**
@@ -259,6 +260,13 @@ export class StreamHandler {
 
         // Caso contrário, cria nova mensagem
         debug('StreamHandler', `📨 criando nova mensagem (${chunk.length} chars)`);
+        // Salva mensagem anterior para correção final de tabelas
+        if (this.currentMessage) {
+          this.sentMessages.push({
+            message: this.currentMessage,
+            content: this.currentRawContent,
+          });
+        }
         this.currentMessage = await this.thread.send(chunk);
         this.currentRawContent = chunk;
         this.currentMessageLength = chunk.length;
@@ -300,10 +308,23 @@ export class StreamHandler {
         return;
       }
 
-      // Para estados finais, envia status visual e reseta o bloco atual
-      if (status === 'finished' || status === 'error' || status === 'restart') {
-        // Corrige tabelas que foram fragmentadas durante o streaming
-        if (this.currentMessage && this.currentRawContent) {
+        // Para estados finais, envia status visual e reseta o bloco atual
+        if (status === 'finished' || status === 'error' || status === 'restart') {
+          // Corrige tabelas em mensagens anteriores (overflow)
+          for (const entry of this.sentMessages) {
+            const fixed = convertMarkdownTables(entry.content);
+            if (fixed !== entry.content) {
+              try {
+                debug('StreamHandler', '🔧 corrigindo tabelas em mensagem anterior');
+                await entry.message.edit(fixed);
+                entry.content = fixed;
+              } catch (editErr) {
+                debug('StreamHandler', `⚠️ falha ao corrigir tabela em msg anterior: ${editErr.message}`);
+              }
+            }
+          }
+          // Corrige tabelas que foram fragmentadas durante o streaming
+          if (this.currentMessage && this.currentRawContent) {
           const fixed = convertMarkdownTables(this.currentRawContent);
           if (fixed !== this.currentRawContent) {
             try {
