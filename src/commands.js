@@ -194,6 +194,13 @@ export const commandDefinitions = [
  * @param {import('./session-manager.js').SessionManager} sessionManager
  */
 export async function handleCommand(interaction, sessionManager) {
+  // Guard: ignora interações expiradas (reenviadas pelo gateway ao reconectar)
+  const AGE_LIMIT_MS = 2500;
+  if (Date.now() - interaction.createdTimestamp > AGE_LIMIT_MS) {
+    console.warn(`[commands] ⏰ Interação expirada ignorada (${Date.now() - interaction.createdTimestamp}ms): ${interaction.commandName}`);
+    return;
+  }
+
   // Verificação de acesso
   if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(interaction.user.id)) {
     return replyError(interaction, 'Você não tem permissão para usar este bot.');
