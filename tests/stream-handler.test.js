@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { StreamHandler } from '../src/stream-handler.js';
+import { StreamHandler, _internal } from '../src/stream-handler.js';
 
 // ─── Mock de discord.js para que AttachmentBuilder seja interceptado ──────────
 vi.mock('discord.js', () => {
@@ -12,34 +12,6 @@ vi.mock('discord.js', () => {
   };
   return { AttachmentBuilder };
 });
-
-// ─── Re-implementações de funções privadas para testes isolados ───────────────
-// (as originais não são exportadas; mantemos a re-implementação fiel)
-
-function splitIntoChunks(text, limit) {
-  const chunks = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= limit) {
-      chunks.push(remaining);
-      break;
-    }
-
-    let splitAt = remaining.lastIndexOf('\n', limit);
-    if (splitAt <= 0) splitAt = limit;
-
-    chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt).trimStart();
-  }
-
-  return chunks;
-}
-
-function mergeContent(existing, newChunk) {
-  if (!existing) return newChunk;
-  return existing + '\n' + newChunk;
-}
 
 // ─── Helper para drenar a fila de microtasks pendentes ────────────────────────
 
@@ -80,14 +52,14 @@ function createMockSession() {
 
 describe('splitIntoChunks', () => {
   it('retorna texto curto como chunk único', () => {
-    const result = splitIntoChunks('Hello', 1900);
+    const result = _internal.splitIntoChunks('Hello', 1900);
     expect(result).toEqual(['Hello']);
   });
 
   it('divide texto longo respeitando o limite', () => {
     const line = 'a'.repeat(100) + '\n';
     const text = line.repeat(25); // 2525 chars
-    const chunks = splitIntoChunks(text, 1900);
+    const chunks = _internal.splitIntoChunks(text, 1900);
 
     expect(chunks.length).toBeGreaterThan(1);
     chunks.forEach((c) => expect(c.length).toBeLessThanOrEqual(1900));
@@ -95,18 +67,18 @@ describe('splitIntoChunks', () => {
 
   it('quebra na última newline antes do limite', () => {
     const text = 'linha1\nlinha2\nlinha3';
-    const chunks = splitIntoChunks(text, 13);
+    const chunks = _internal.splitIntoChunks(text, 13);
     expect(chunks[0]).toBe('linha1\nlinha2');
   });
 
   it('força quebra no limite quando não há newline', () => {
     const text = 'a'.repeat(3000);
-    const chunks = splitIntoChunks(text, 1900);
+    const chunks = _internal.splitIntoChunks(text, 1900);
     expect(chunks[0].length).toBe(1900);
   });
 
   it('lida com string vazia', () => {
-    expect(splitIntoChunks('', 1900)).toEqual([]);
+    expect(_internal.splitIntoChunks('', 1900)).toEqual([]);
   });
 });
 
@@ -114,11 +86,11 @@ describe('splitIntoChunks', () => {
 
 describe('mergeContent', () => {
   it('retorna novo chunk quando existing é vazio', () => {
-    expect(mergeContent('', 'novo')).toBe('novo');
+    expect(_internal.mergeContent('', 'novo')).toBe('novo');
   });
 
   it('concatena com newline', () => {
-    expect(mergeContent('existente', 'novo')).toBe('existente\nnovo');
+    expect(_internal.mergeContent('existente', 'novo')).toBe('existente\nnovo');
   });
 });
 
@@ -681,6 +653,127 @@ describe('StreamHandler', () => {
       await handler._drainStatusQueue();
 
       expect(handler._processingStatus).toBe(false);
+    });
+  });
+
+  // ─── _sendDMNotification ──────────────────────────────────────────────────
+
+  describe('_sendDMNotification()', () => {
+    it('envia DM com status finished quando sessão conclui com sucesso', async () => {
+      const mockMember = {
+        send: vi.fn().mockResolvedValue({}),
+      };
+      const mockGuild = {
+        members: {
+          fetch: vi.fn().mockResolvedValue(mockMember),
+        },
+      };
+      thread.guild = mockGuild;
+      session.outputBuffer = 'Resultado final da sessão';
+      session.agent = 'plan';
+      session.projectPath = '/projetos/meuapp';
+
+      handler.start();
+      await handler._sendDMNotification('finished');
+
+      expect(mockGuild.members.fetch).toHaveBeenCalledWith('user-123');
+      expect(mockMember.send).toHaveBeenCalledOnce();
+      const [msg] = mockMember.send.mock.calls[0];
+      expect(msg).toContain('✅');
+      expect(msg).toContain('concluída');
+      expect(msg).toContain('plan');
+      expect(msg).toContain('meuapp');
+    });
+
+    it('envia DM com status error e ícone de erro', async () => {
+      const mockMember = {
+        send: vi.fn().mockResolvedValue({}),
+      };
+      const mockGuild = {
+        members: {
+          fetch: vi.fn().mockResolvedValue(mockMember),
+        },
+      };
+      thread.guild = mockGuild;
+      session.outputBuffer = 'Erro durante processamento';
+      session.agent = 'build';
+
+      handler.start();
+      await handler._sendDMNotification('error');
+
+      expect(mockMember.send).toHaveBeenCalledOnce();
+      const [msg] = mockMember.send.mock.calls[0];
+      expect(msg).toContain('❌');
+      expect(msg).toContain('com erro');
+    });
+
+    it('inclui preview de 200 últimos chars do buffer na DM', async () => {
+      const longOutput = 'inicio '.repeat(100) + 'final da sessão';
+      const mockMember = {
+        send: vi.fn().mockResolvedValue({}),
+      };
+      const mockGuild = {
+        members: {
+          fetch: vi.fn().mockResolvedValue(mockMember),
+        },
+      };
+      thread.guild = mockGuild;
+      session.outputBuffer = longOutput;
+
+      await handler._sendDMNotification('finished');
+
+      const [msg] = mockMember.send.mock.calls[0];
+      expect(msg).toContain('```');
+      expect(msg).toContain('final da sessão');
+    });
+
+    it('não inclui preview quando buffer está vazio', async () => {
+      const mockMember = {
+        send: vi.fn().mockResolvedValue({}),
+      };
+      const mockGuild = {
+        members: {
+          fetch: vi.fn().mockResolvedValue(mockMember),
+        },
+      };
+      thread.guild = mockGuild;
+      session.outputBuffer = '';
+
+      await handler._sendDMNotification('finished');
+
+      const [msg] = mockMember.send.mock.calls[0];
+      expect(msg).not.toContain('```');
+    });
+
+    it('captura erro silenciosamente sem lançar exceção', async () => {
+      const mockGuild = {
+        members: {
+          fetch: vi.fn().mockRejectedValue(new Error('Membro não encontrado')),
+        },
+      };
+      thread.guild = mockGuild;
+
+      await expect(
+        handler._sendDMNotification('finished')
+      ).resolves.not.toThrow();
+    });
+
+    it('inclui referência à thread na DM', async () => {
+      const mockMember = {
+        send: vi.fn().mockResolvedValue({}),
+      };
+      const mockGuild = {
+        members: {
+          fetch: vi.fn().mockResolvedValue(mockMember),
+        },
+      };
+      thread.guild = mockGuild;
+
+      await handler._sendDMNotification('finished');
+
+      const [msg] = mockMember.send.mock.calls[0];
+      expect(msg).toContain('<#');
+      expect(msg).toContain('thread-123');
     });
   });
 });

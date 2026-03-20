@@ -406,3 +406,11 @@ function getDiffLanguage(ext) {
   };
   return langMap[ext] ?? 'diff';
 }
+
+// ─── Exports internos para testes ────────────────────────────────────────────
+
+/**
+ * Funções internas expostas exclusivamente para cobertura de testes.
+ * Não fazem parte da API pública do módulo.
+ */
+export const _internal = { splitIntoChunks, mergeContent };

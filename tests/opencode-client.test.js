@@ -3,6 +3,12 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { OpenCodeClient } from '../src/opencode-client.js';
+import { parseSSEStream } from '../src/sse-parser.js';
+
+// ─── Mock de sse-parser (hoisted) ─────────────────────────────────────────────
+vi.mock('../src/sse-parser.js', () => ({
+  parseSSEStream: vi.fn().mockResolvedValue(undefined),
+}));
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -222,6 +228,87 @@ describe('OpenCodeClient', () => {
 
       expect(response.ok).toBe(false);
       expect(response.status).toBe(404);
+    });
+  });
+
+  // ─── connectSSE ──────────────────────────────────────────────────────────
+
+  describe('connectSSE()', () => {
+    let mockReadableStream;
+    let mockAbortSignal;
+
+    beforeEach(() => {
+      mockAbortSignal = { aborted: false };
+      mockReadableStream = {
+        getReader: vi.fn().mockReturnValue({
+          read: vi.fn().mockResolvedValue({ done: true, value: undefined }),
+        }),
+      };
+    });
+
+    it('chama fetch com GET /event e Accept: text/event-stream', async () => {
+      mockFetch.mockResolvedValue(
+        mockResponse({ message: 'ok' }, 200)
+      );
+      const client = new OpenCodeClient(BASE_URL);
+      const onEvent = vi.fn();
+
+      await expect(
+        client.connectSSE(mockAbortSignal, onEvent)
+      ).resolves.not.toThrow();
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${BASE_URL}/event`,
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({
+            'Accept': 'text/event-stream',
+          }),
+          signal: mockAbortSignal,
+        }),
+      );
+    });
+
+    it('lança Error descritivo quando servidor retorna 500', async () => {
+      mockFetch.mockResolvedValue(mockResponse({ error: 'Internal Server Error' }, 500));
+      const client = new OpenCodeClient(BASE_URL);
+
+      await expect(
+        client.connectSSE(mockAbortSignal, () => {})
+      ).rejects.toThrow('500');
+    });
+
+    it('inclui path /event na mensagem de erro', async () => {
+      mockFetch.mockResolvedValue(mockResponse('erro', 503));
+      const client = new OpenCodeClient(BASE_URL);
+
+      await expect(
+        client.connectSSE(mockAbortSignal, () => {})
+      ).rejects.toThrow('/event');
+    });
+
+    it('passa onEvent e onError callbacks para parseSSEStream', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(''),
+      });
+      const client = new OpenCodeClient(BASE_URL);
+      const onEvent = vi.fn();
+      const onError = vi.fn();
+
+      // Verifica que connectSSE não lança ao receber callbacks opcionais
+      await expect(
+        client.connectSSE(mockAbortSignal, onEvent, onError)
+      ).resolves.not.toThrow();
+
+      // Verifica que parseSSEStream foi chamado com os callbacks corretos
+      expect(parseSSEStream).toHaveBeenCalledWith(
+        expect.anything(), // a response
+        onEvent,
+        onError,
+      );
     });
   });
 });
