@@ -7,26 +7,32 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { PERSISTENCE_PATH } from './config.js';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-const PERSISTENCE_DIR = process.env.PERSISTENCE_PATH
-  ? path.dirname(process.env.PERSISTENCE_PATH)
+const PERSISTENCE_DIR = PERSISTENCE_PATH
+  ? path.dirname(PERSISTENCE_PATH)
   : path.join(os.homedir(), '.opencode-discord');
 
-const PERSISTENCE_FILE = process.env.PERSISTENCE_PATH
+const PERSISTENCE_FILE = PERSISTENCE_PATH
   || path.join(os.homedir(), '.opencode-discord', 'data.json');
 
 const SCHEMA_VERSION = 1;
 
 // ─── Helpers internos ────────────────────────────────────────────────────────
 
+/** Flag para evitar chamadas redundantes de mkdir após a primeira execução. */
+let _dirEnsured = false;
+
 /**
- * Garante que o diretório de persistência existe.
+ * Garante que o diretório de persistência existe (com cache de flag).
  * @returns {Promise<void>}
  */
 async function ensureDir() {
+  if (_dirEnsured) return;
   await fs.mkdir(PERSISTENCE_DIR, { recursive: true });
+  _dirEnsured = true;
 }
 
 /**
@@ -59,6 +65,21 @@ async function writeFile(data) {
   await fs.writeFile(PERSISTENCE_FILE, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+// ─── Fila de escrita ──────────────────────────────────────────────────────────
+
+/** Fila de serialização de escritas para evitar race conditions. */
+let _writeQueue = Promise.resolve();
+
+/**
+ * Enfileira uma operação de escrita para execução serial.
+ * @param {() => Promise<void>} fn
+ * @returns {Promise<void>}
+ */
+function enqueueWrite(fn) {
+  _writeQueue = _writeQueue.then(fn, fn);
+  return _writeQueue;
+}
+
 // ─── API pública ─────────────────────────────────────────────────────────────
 
 /**
@@ -76,7 +97,7 @@ export async function loadSessions() {
  * @returns {Promise<void>}
  */
 export async function saveSession(sessionData) {
-  try {
+  return enqueueWrite(async () => {
     const data = await readFile();
     const idx = data.sessions.findIndex(s => s.sessionId === sessionData.sessionId);
     if (idx >= 0) {
@@ -85,9 +106,7 @@ export async function saveSession(sessionData) {
       data.sessions.push(sessionData);
     }
     await writeFile(data);
-  } catch (err) {
-    console.error('[Persistence] Erro ao salvar sessão:', err);
-  }
+  });
 }
 
 /**
@@ -96,13 +115,11 @@ export async function saveSession(sessionData) {
  * @returns {Promise<void>}
  */
 export async function removeSession(sessionId) {
-  try {
+  return enqueueWrite(async () => {
     const data = await readFile();
     data.sessions = data.sessions.filter(s => s.sessionId !== sessionId);
     await writeFile(data);
-  } catch (err) {
-    console.error('[Persistence] Erro ao remover sessão:', err);
-  }
+  });
 }
 
 /**
@@ -110,9 +127,7 @@ export async function removeSession(sessionId) {
  * @returns {Promise<void>}
  */
 export async function clearSessions() {
-  try {
+  return enqueueWrite(async () => {
     await writeFile({ version: SCHEMA_VERSION, sessions: [] });
-  } catch (err) {
-    console.error('[Persistence] Erro ao limpar sessões:', err);
-  }
+  });
 }

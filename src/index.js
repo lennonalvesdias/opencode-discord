@@ -17,7 +17,7 @@ import { handleCommand, handleInteraction, handleAutocomplete, commandDefinition
 import { formatAge, debug } from './utils.js';
 import { ALLOWED_USERS, ALLOW_SHARED_SESSIONS, CHANNEL_FETCH_TIMEOUT_MS, SHUTDOWN_TIMEOUT_MS } from './config.js';
 import { startHealthServer } from './health.js';
-import { loadSessions, clearSessions } from './persistence.js';
+import { loadSessions, removeSession } from './persistence.js';
 
 // ─── Validação de configuração ────────────────────────────────────────────────
 
@@ -74,7 +74,10 @@ client.once('clientReady', async (c) => {
       console.log(`[Index] ⚠️ ${activeSessions.length} sessão(ões) interrompida(s) pelo restart`);
       for (const s of activeSessions) {
         try {
-          const channel = await client.channels.fetch(s.threadId).catch(() => null);
+          const channel = await Promise.race([
+            client.channels.fetch(s.threadId),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout fetch canal')), 5_000)),
+          ]).catch(() => null);
           if (channel && channel.isThread()) {
             await channel.send(
               `⚠️ **O bot foi reiniciado** e a sessão \`${s.sessionId}\` (projeto \`${path.basename(s.projectPath)}\`) foi encerrada.\n` +
@@ -84,8 +87,11 @@ client.once('clientReady', async (c) => {
         } catch (err) {
           console.error(`[Index] Erro ao notificar thread ${s.threadId}:`, err);
         }
+        // Remover sessão interrompida da persistência (após notificar)
+        await removeSession(s.sessionId).catch(err =>
+          console.error(`[Index] Erro ao remover sessão ${s.sessionId} da persistência:`, err)
+        );
       }
-      await clearSessions();
     }
   } catch (err) {
     console.error('[Index] Erro ao carregar sessões persistidas:', err);

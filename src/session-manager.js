@@ -538,6 +538,9 @@ class SessionManager {
     await session.close().catch((err) => {
       console.error('[SessionManager] ⚠️ Erro ao encerrar sessão expirada %s:', session.sessionId, err.message);
     });
+    removeSession(session.sessionId).catch(err =>
+      console.error('[SessionManager] Erro ao remover sessão expirada da persistência:', err)
+    );
     // Deleções abaixo são intencionalmente redundantes com o listener 'close' registrado em create().
     // São no-ops seguros caso o listener já tenha executado primeiro.
     this._sessions.delete(session.sessionId);

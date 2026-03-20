@@ -14,6 +14,7 @@ import {
 import { existsSync } from 'fs';
 import { readdir } from 'fs/promises';
 import path from 'path';
+import { spawn } from 'node:child_process';
 import { StreamHandler } from './stream-handler.js';
 import { formatAge, debug } from './utils.js';
 import { listOpenCodeCommands } from './opencode-commands.js';
@@ -507,8 +508,6 @@ async function handleDiffCommand(interaction, sessionManager) {
 
   await interaction.deferReply();
 
-  const { spawn } = await import('node:child_process');
-
   let diffOutput = '';
 
   try {
@@ -523,7 +522,7 @@ async function handleDiffCommand(interaction, sessionManager) {
       proc.stdout.on('data', (chunk) => { out += chunk.toString(); });
       proc.stderr.on('data', (chunk) => { err += chunk.toString(); });
       proc.on('close', (code) => {
-        if (code !== 0 && err) reject(new Error(err));
+        if (code !== 0) reject(new Error(err || `git diff saiu com código ${code}`));
         else resolve(out);
       });
       proc.on('error', reject);
