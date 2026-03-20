@@ -215,13 +215,21 @@ export class StreamHandler {
   }
 
   /**
-   * Envia/atualiza mensagens com o conteúdo acumulado
+   * Envia/atualiza mensagens com o conteúdo acumulado.
+   * Processa apenas linhas completas para não quebrar a detecção de tabelas
+   * cujas linhas chegam fragmentadas entre intervalos de flush.
    */
   async flush() {
     if (!this.currentContent.trim()) return;
 
-    const content = convertMarkdownTables(this.currentContent);
-    this.currentContent = '';
+    // Processa apenas linhas completas para não quebrar detecção de tabelas
+    const lastNewline = this.currentContent.lastIndexOf('\n');
+    if (lastNewline === -1) return; // sem linha completa ainda
+
+    const toProcess = this.currentContent.slice(0, lastNewline + 1);
+    this.currentContent = this.currentContent.slice(lastNewline + 1);
+
+    const content = convertMarkdownTables(toProcess);
 
     // Divide em chunks respeitando o limite Discord
     const chunks = splitIntoChunks(content, MSG_LIMIT);
@@ -294,6 +302,21 @@ export class StreamHandler {
 
       // Para estados finais, envia status visual e reseta o bloco atual
       if (status === 'finished' || status === 'error' || status === 'restart') {
+        // Corrige tabelas que foram fragmentadas durante o streaming
+        if (this.currentMessage && this.currentRawContent) {
+          const fixed = convertMarkdownTables(this.currentRawContent);
+          if (fixed !== this.currentRawContent) {
+            try {
+              debug('StreamHandler', '🔧 corrigindo tabelas no conteúdo final');
+              await this.currentMessage.edit(fixed);
+              this.currentRawContent = fixed;
+              this.currentMessageLength = fixed.length;
+            } catch (editErr) {
+              // ignora falha de edição final
+              debug('StreamHandler', `⚠️ falha ao corrigir tabelas: ${editErr.message}`);
+            }
+          }
+        }
         await this.thread.send(msg);
         // Reseta current message para próximo bloco começar fresco
         this.currentMessage = null;
@@ -535,18 +558,28 @@ function convertMarkdownTables(text) {
   let i = 0;
 
   while (i < lines.length) {
-    // Detecta tabela: linha de dados + linha separadora logo abaixo
+    // Detecta tabela: linha de cabeçalho + linha separadora logo abaixo
     if (isTableRow(lines[i]) && i + 1 < lines.length && isSeparatorRow(lines[i + 1])) {
-      const tableRows = [lines[i]]; // cabeçalho
-      i += 2; // pula cabeçalho e separador
+      const headerLine = lines[i];
+      const sepLine = lines[i + 1];
+      let j = i + 2;
 
       // Coleta linhas de dados da tabela
-      while (i < lines.length && isTableRow(lines[i])) {
-        tableRows.push(lines[i]);
-        i++;
+      while (j < lines.length && isTableRow(lines[j])) {
+        j++;
       }
 
-      result.push(formatTableAsCode(tableRows));
+      const dataRows = lines.slice(i + 2, j);
+
+      if (dataRows.length === 0) {
+        // Tabela sem dados ainda (stream incompleto) — mantém como texto raw
+        result.push(headerLine);
+        result.push(sepLine);
+        i += 2;
+      } else {
+        result.push(formatTableAsCode([headerLine, ...dataRows]));
+        i = j;
+      }
     } else {
       result.push(lines[i]);
       i++;
