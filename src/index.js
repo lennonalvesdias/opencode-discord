@@ -168,7 +168,7 @@ client.on('messageCreate', async (message) => {
   const text = message.content.trim();
 
   // Comandos especiais inline
-  if (text === '/stop' || text === '/parar') {
+  if (text === '/stop') {
     await sessionManager.destroy(session.sessionId);
     await message.reply('🛑 Sessão encerrada.');
     return;
