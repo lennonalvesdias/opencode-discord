@@ -233,7 +233,7 @@ export class StreamHandler {
 
     // Combina linhas de tabela pendentes do flush anterior com o conteúdo atual
     const combined = this._pendingTableLines
-      ? this._pendingTableLines + '\n' + toProcess
+      ? this._pendingTableLines.trimEnd() + '\n' + toProcess
       : toProcess;
     this._pendingTableLines = '';
 
