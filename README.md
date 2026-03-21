@@ -1,7 +1,7 @@
 # 🌊 RemoteFlow
 
 <p align="center">
-  <img src="public/images/header.png" alt="RemoteFlow Header" width="100%">
+  <img src="./public/images/header.png" alt="RemoteFlow Header" width="100%">
 </p>
 
 > **O fluxo de desenvolvimento que acompanha você.**
