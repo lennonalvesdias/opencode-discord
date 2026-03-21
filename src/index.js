@@ -19,6 +19,7 @@ import { ALLOWED_USERS, ALLOW_SHARED_SESSIONS, CHANNEL_FETCH_TIMEOUT_MS, SHUTDOW
 import { startHealthServer } from './health.js';
 import { loadSessions, removeSession } from './persistence.js';
 import { initAudit, audit } from './audit.js';
+import { loadModels } from './model-loader.js';
 
 // ─── Validação de configuração ────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ client.once('clientReady', async (c) => {
   console.log(`📁 Projetos: ${process.env.PROJECTS_BASE_PATH}`);
   console.log(`🔧 OpenCode: ${process.env.OPENCODE_BIN || 'opencode'}\n`);
   await initAudit();
+  await loadModels();
   await registerCommands();
   startHealthServer({ sessionManager, serverManager, startedAt: Date.now() });
 });
@@ -192,8 +194,9 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  let queueResult;
   try {
-    await session.queueMessage(text);
+    queueResult = await session.queueMessage(text);
   } catch (err) {
     debug('index', '❌ Erro ao enfileirar mensagem:', err.message);
     await message.reply('⚠️ O processo OpenCode não está ativo nesta sessão. Use `/plan` ou `/build` para iniciar uma nova.').catch(() => {});
@@ -202,11 +205,20 @@ client.on('messageCreate', async (message) => {
 
   debug('Bot', `↩️  input encaminhado para opencode`);
 
-  // Reação visual de "recebido"
-  try {
-    await message.react('⚙️');
-  } catch (reactErr) {
-    debug('Bot', '⚠️ Erro ao reagir à mensagem: %s', reactErr.message);
+  if (queueResult.queued) {
+    // Mensagem enfileirada — informa posição ao usuário
+    try {
+      await message.reply(`📮 Sua mensagem foi enfileirada (posição ${queueResult.position}). Ela será enviada quando o agente concluir a tarefa atual.`);
+    } catch (replyErr) {
+      debug('Bot', '⚠️ Erro ao notificar posição na fila: %s', replyErr.message);
+    }
+  } else {
+    // Mensagem enviada imediatamente — reação visual de "recebido"
+    try {
+      await message.react('⚙️');
+    } catch (reactErr) {
+      debug('Bot', '⚠️ Erro ao reagir à mensagem: %s', reactErr.message);
+    }
   }
 
   await audit('message.passthrough', { text: text.slice(0, 100) }, message.author.id, session.sessionId);

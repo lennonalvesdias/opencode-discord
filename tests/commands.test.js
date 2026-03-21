@@ -42,7 +42,6 @@ vi.mock('../src/config.js', () => ({
   SHUTDOWN_TIMEOUT_MS: 10000,
   CHANNEL_FETCH_TIMEOUT_MS: 2000,
   SERVER_CIRCUIT_BREAKER_COOLDOWN_MS: 60000,
-  AVAILABLE_MODELS: ['anthropic/claude-sonnet-4-5', 'openai/gpt-4o'],
   DEFAULT_MODEL: '',
   MAX_SESSIONS_PER_PROJECT: 2,
   PERMISSION_TIMEOUT_MS: 60000,
@@ -54,6 +53,10 @@ vi.mock('../src/config.js', () => ({
 }));
 
 vi.mock('node:child_process', () => ({ spawn: mockSpawn }));
+
+vi.mock('../src/model-loader.js', () => ({
+  getAvailableModels: () => ['anthropic/claude-sonnet-4-5', 'openai/gpt-4o'],
+}));
 
 vi.mock('../src/opencode-commands.js', () => ({
   listOpenCodeCommands: vi.fn().mockResolvedValue([
@@ -123,7 +126,7 @@ function mockDirentDir(name) {
  * @returns {object}
  */
 function createInteraction({
-  commandName = 'projetos',
+  commandName = 'projects',
   userId = null,
   options = {},
   channelId = 'channel-test',
@@ -137,10 +140,10 @@ function createInteraction({
     getBoolean: vi.fn(() => null),
     getFocused: vi.fn((withObject) =>
       withObject
-        ? { name: options._focusedName ?? 'projeto', value: options._focusedValue ?? '' }
+        ? { name: options._focusedName ?? 'project', value: options._focusedValue ?? '' }
         : (options._focusedValue ?? '')
     ),
-    getSubcommand: vi.fn(() => null),
+    getSubcommand: vi.fn(() => options._subcommand ?? null),
   };
 
   return {
@@ -291,12 +294,12 @@ describe('commandDefinitions', () => {
     const names = commandDefinitions.map((c) => c.name);
     expect(names).toContain('plan');
     expect(names).toContain('build');
-    expect(names).toContain('sessoes');
+    expect(names).toContain('sessions');
     expect(names).toContain('status');
-    expect(names).toContain('parar');
-    expect(names).toContain('projetos');
-    expect(names).toContain('historico');
-    expect(names).toContain('comando');
+    expect(names).toContain('stop');
+    expect(names).toContain('projects');
+    expect(names).toContain('history');
+    expect(names).toContain('command');
   });
 });
 
@@ -314,7 +317,7 @@ describe('handleCommand()', () => {
   it('recusa usuário não autorizado quando ALLOWED_USERS está configurado', async () => {
     mockConfigState.allowedUsers = ['usuario-permitido-123'];
     const interaction = createInteraction({
-      commandName: 'projetos',
+      commandName: 'projects',
       userId: 'usuario-bloqueado-456',
     });
     const sm = createSessionManager();
@@ -331,7 +334,7 @@ describe('handleCommand()', () => {
 
   it('/sessoes — responde com mensagem de lista vazia quando não há sessões ativas', async () => {
     // ALLOWED_USERS vazio = todos permitidos
-    const interaction = createInteraction({ commandName: 'sessoes' });
+    const interaction = createInteraction({ commandName: 'sessions' });
     const sm = createSessionManager(); // getAllResult = [] por padrão
 
     await handleCommand(interaction, sm);
@@ -345,7 +348,7 @@ describe('handleCommand()', () => {
   });
 
   it('/sessoes — consulta sessionManager independentemente de userId', async () => {
-    const interaction = createInteraction({ commandName: 'sessoes' });
+    const interaction = createInteraction({ commandName: 'sessions' });
     const sm = createSessionManager();
 
     await handleCommand(interaction, sm);
@@ -463,6 +466,7 @@ describe('handleCommand() — comandos adicionais', () => {
   it('/status — com sessão responde com embed', async () => {
     const session = {
       sessionId: 'sess-st-1',
+      getQueueSize: vi.fn().mockReturnValue(0),
       toSummary: vi.fn().mockReturnValue({ sessionId: 'sess-st-1', project: 'proj', status: 'running', userId: 'u1', projectPath: '/projetos/proj', createdAt: new Date(), lastActivityAt: new Date() }),
     };
     const sm = createSessionManager({ getByThreadResult: session });
@@ -481,7 +485,7 @@ describe('handleCommand() — comandos adicionais', () => {
   it('/sessoes — com sessões ativas responde com embed', async () => {
     const sessions = [{ sessionId: 'sess-list-1', status: 'running', projectPath: '/projetos/proj1', createdAt: new Date() }];
     const sm = createSessionManager({ getAllResult: sessions });
-    const interaction = createInteraction({ commandName: 'sessoes' });
+    const interaction = createInteraction({ commandName: 'sessions' });
     await handleCommand(interaction, sm);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ embeds: expect.any(Array) }));
   });
@@ -489,7 +493,7 @@ describe('handleCommand() — comandos adicionais', () => {
   it('/projetos — com projetos responde com embed', async () => {
     fsp.readdir.mockResolvedValue([mockDirentDir('proj-a'), mockDirentDir('proj-b')]);
     const sm = createSessionManager();
-    const interaction = createInteraction({ commandName: 'projetos' });
+    const interaction = createInteraction({ commandName: 'projects' });
     await handleCommand(interaction, sm);
     expect(interaction.deferReply).toHaveBeenCalled();
     expect(interaction.editReply).toHaveBeenCalled();
@@ -498,14 +502,14 @@ describe('handleCommand() — comandos adicionais', () => {
   it('/historico — com sessão responde com arquivo', async () => {
     const session = { sessionId: 'sess-hist-1', outputBuffer: 'algum output' };
     const sm = createSessionManager({ getByThreadResult: session });
-    const interaction = createInteraction({ commandName: 'historico' });
+    const interaction = createInteraction({ commandName: 'history' });
     await handleCommand(interaction, sm);
     expect(interaction.reply).toHaveBeenCalled();
   });
 
   it('/historico — sem sessão responde com erro', async () => {
     const sm = createSessionManager({ getByThreadResult: null });
-    const interaction = createInteraction({ commandName: 'historico' });
+    const interaction = createInteraction({ commandName: 'history' });
     await handleCommand(interaction, sm);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('sessão') }));
   });
@@ -513,14 +517,14 @@ describe('handleCommand() — comandos adicionais', () => {
   it('/parar — com sessão responde com confirmação de encerramento', async () => {
     const session = { sessionId: 'sess-stop-1', projectPath: '/projetos/meu-proj', userId: 'user-st' };
     const sm = createSessionManager({ getByThreadResult: session });
-    const interaction = createInteraction({ commandName: 'parar' });
+    const interaction = createInteraction({ commandName: 'stop' });
     await handleCommand(interaction, sm);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('Deseja encerrar') }));
   });
 
   it('/parar — sem sessão responde com erro', async () => {
     const sm = createSessionManager({ getByThreadResult: null });
-    const interaction = createInteraction({ commandName: 'parar' });
+    const interaction = createInteraction({ commandName: 'stop' });
     await handleCommand(interaction, sm);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('sessão') }));
   });
@@ -528,7 +532,7 @@ describe('handleCommand() — comandos adicionais', () => {
   it('/comando — envia comando para sessão ativa', async () => {
     const session = { sessionId: 'sess-cmd-1', projectPath: '/projetos/cmd-proj', sendMessage: vi.fn().mockResolvedValue({}) };
     const sm = createSessionManager({ getByThreadResult: session });
-    const interaction = createInteraction({ commandName: 'comando', options: { nome: 'meu-cmd', args: '' } });
+    const interaction = createInteraction({ commandName: 'command', options: { name: 'meu-cmd', args: '' } });
     await handleCommand(interaction, sm);
     expect(session.sendMessage).toHaveBeenCalledWith('/meu-cmd');
     expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('enviado'));
@@ -536,14 +540,14 @@ describe('handleCommand() — comandos adicionais', () => {
 
   it('/comando — sem sessão responde com erro', async () => {
     const sm = createSessionManager({ getByThreadResult: null });
-    const interaction = createInteraction({ commandName: 'comando', options: { nome: 'meu-cmd', args: '' } });
+    const interaction = createInteraction({ commandName: 'command', options: { name: 'meu-cmd', args: '' } });
     await handleCommand(interaction, sm);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('sessão') }));
   });
 
   it('/plan — cria sessão em thread com projectName fornecido', async () => {
     const sm = createSessionManager();
-    const interaction = createInteraction({ commandName: 'plan', options: { projeto: 'meu-projeto' } });
+    const interaction = createInteraction({ commandName: 'plan', options: { project: 'meu-projeto' } });
     await handleCommand(interaction, sm);
     expect(sm.create).toHaveBeenCalledWith(expect.objectContaining({ projectPath: '/projetos/meu-projeto', agent: 'plan' }));
     expect(interaction.editReply).toHaveBeenCalledWith(expect.stringContaining('iniciada'));
@@ -552,7 +556,7 @@ describe('handleCommand() — comandos adicionais', () => {
 
 describe('handleAutocomplete() — modelos', () => {
   it('sugere modelos filtrando por prefixo digitado', async () => {
-    const interaction = createInteraction({ commandName: 'plan', options: { _focusedName: 'modelo', _focusedValue: 'anthropic' } });
+    const interaction = createInteraction({ commandName: 'plan', options: { _focusedName: 'model', _focusedValue: 'anthropic' } });
     await handleAutocomplete(interaction);
     expect(interaction.respond).toHaveBeenCalledWith(expect.arrayContaining([{ name: 'anthropic/claude-sonnet-4-5', value: 'anthropic/claude-sonnet-4-5' }]));
   });
@@ -601,7 +605,7 @@ describe('getRateLimitStats()', () => {
   it('conta usuário bloqueado após atingir 5 comandos na janela de 60s', async () => {
     const blockedUserId = `blocked-user-${randomUUID()}`;
     const sm = createSessionManager();
-    const interaction = createInteraction({ commandName: 'projetos', userId: blockedUserId });
+    const interaction = createInteraction({ commandName: 'projects', userId: blockedUserId });
     fsp.readdir.mockResolvedValue([]);
 
     // Executa 6 comandos para ultrapassar o limite de 5
@@ -638,8 +642,8 @@ describe('replyError — followUp quando já respondido', () => {
 describe('handleAutocomplete() — /comando', () => {
   it('sugere comandos opencode filtrados pelo valor digitado', async () => {
     const interaction = createInteraction({
-      commandName: 'comando',
-      options: { _focusedName: 'nome', _focusedValue: 'hel' },
+      commandName: 'command',
+      options: { _focusedName: 'name', _focusedValue: 'hel' },
     });
 
     await handleAutocomplete(interaction);
@@ -651,8 +655,8 @@ describe('handleAutocomplete() — /comando', () => {
 
   it('sugere todos os comandos quando valor digitado está vazio', async () => {
     const interaction = createInteraction({
-      commandName: 'comando',
-      options: { _focusedName: 'nome', _focusedValue: '' },
+      commandName: 'command',
+      options: { _focusedName: 'name', _focusedValue: '' },
     });
 
     await handleAutocomplete(interaction);
@@ -677,7 +681,7 @@ describe('handleAutocomplete() — projeto autocomplete', () => {
   it('sugere projetos filtrados para /plan com foco em projeto', async () => {
     const interaction = createInteraction({
       commandName: 'plan',
-      options: { _focusedName: 'projeto', _focusedValue: 'al' },
+      options: { _focusedName: 'project', _focusedValue: 'al' },
     });
 
     await handleAutocomplete(interaction);
@@ -702,7 +706,7 @@ describe('handleCommand() — /plan validações', () => {
     const sm = createSessionManager();
     const interaction = createInteraction({
       commandName: 'plan',
-      options: { projeto: 'a'.repeat(257) },
+      options: { project: 'a'.repeat(257) },
     });
 
     await handleCommand(interaction, sm);
@@ -716,7 +720,7 @@ describe('handleCommand() — /plan validações', () => {
     const sm = createSessionManager();
     const interaction = createInteraction({
       commandName: 'plan',
-      options: { projeto: 'meu-projeto', prompt: 'x'.repeat(10001) },
+      options: { project: 'meu-projeto', prompt: 'x'.repeat(10001) },
     });
 
     await handleCommand(interaction, sm);
@@ -761,7 +765,7 @@ describe('handleCommand() — /plan validações', () => {
     const interaction = createInteraction({
       commandName: 'plan',
       userId,
-      options: { projeto: 'meu-projeto' },
+      options: { project: 'meu-projeto' },
     });
 
     await handleCommand(interaction, sm);
@@ -776,7 +780,7 @@ describe('handleCommand() — /plan validações', () => {
     const sm = createSessionManager({ getAllResult: [{ status: 'running' }] });
     const interaction = createInteraction({
       commandName: 'plan',
-      options: { projeto: 'meu-projeto' },
+      options: { project: 'meu-projeto' },
     });
 
     await handleCommand(interaction, sm);
@@ -792,7 +796,7 @@ describe('handleCommand() — /plan validações', () => {
     });
     const interaction = createInteraction({
       commandName: 'plan',
-      options: { projeto: 'meu-projeto' },
+      options: { project: 'meu-projeto' },
     });
 
     await handleCommand(interaction, sm);
@@ -811,7 +815,7 @@ describe('handleCommand() — /plan validações', () => {
     const sm = createSessionManager();
     const interaction = createInteraction({
       commandName: 'plan',
-      options: { projeto: 'meu-projeto' },
+      options: { project: 'meu-projeto' },
     });
 
     await handleCommand(interaction, sm);
@@ -826,7 +830,7 @@ describe('handleCommand() — /plan validações', () => {
     const sm = createSessionManager();
     const interaction = createInteraction({
       commandName: 'plan',
-      options: { projeto: 'projeto-inexistente' },
+      options: { project: 'projeto-inexistente' },
     });
 
     await handleCommand(interaction, sm);
@@ -848,7 +852,7 @@ describe('handleCommand() — /projetos vazio', () => {
   it('/projetos — readdir vazio → reply com "Nenhum projeto encontrado"', async () => {
     fsp.readdir.mockResolvedValue([]);
     const sm = createSessionManager();
-    const interaction = createInteraction({ commandName: 'projetos' });
+    const interaction = createInteraction({ commandName: 'projects' });
 
     await handleCommand(interaction, sm);
 
@@ -972,6 +976,126 @@ describe('handleCommand() — /diff', () => {
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.stringContaining('Erro'),
     );
+  });
+});
+
+// ─── handleCommand — /fila ───────────────────────────────────────────────────
+
+describe('handleCommand() — /fila', () => {
+  beforeEach(() => {
+    mockConfigState.allowedUsers = [];
+    mockConfigState.maxGlobalSessions = 0;
+    _resetProjectsCache();
+  });
+
+  it('/fila ver — fila vazia → reply com "Nenhuma mensagem na fila"', async () => {
+    const session = {
+      sessionId: 'sess-fila-1',
+      _messageQueue: [],
+      _processingQueue: false,
+      userId: 'user-fila-1',
+    };
+    const sm = createSessionManager({ getByThreadResult: session });
+    const interaction = createInteraction({ commandName: 'queue', options: { _subcommand: 'view' } });
+
+    await handleCommand(interaction, sm);
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Nenhuma mensagem na fila') }),
+    );
+  });
+
+  it('/fila ver — com mensagens → lista mensagens numeradas', async () => {
+    const session = {
+      sessionId: 'sess-fila-2',
+      _messageQueue: ['Primeira mensagem', 'Segunda mensagem'],
+      _processingQueue: false,
+      userId: 'user-fila-2',
+    };
+    const sm = createSessionManager({ getByThreadResult: session });
+    const interaction = createInteraction({ commandName: 'queue', options: { _subcommand: 'view' } });
+
+    await handleCommand(interaction, sm);
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('**1.** Primeira mensagem'),
+      }),
+    );
+  });
+
+  it('/fila limpar — fila com mensagens → remove tudo e confirma contagem', async () => {
+    const userId = nextUserId();
+    const session = {
+      sessionId: 'sess-fila-3',
+      _messageQueue: ['msg-a', 'msg-b', 'msg-c'],
+      _processingQueue: false,
+      userId,
+    };
+    const sm = createSessionManager({ getByThreadResult: session });
+    const interaction = createInteraction({ commandName: 'queue', userId, options: { _subcommand: 'clear' } });
+
+    await handleCommand(interaction, sm);
+
+    expect(session._messageQueue).toHaveLength(0);
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('3 mensagem(s) removida(s)') }),
+    );
+  });
+
+  it('/fila limpar — processando mensagem → avisa sobre mensagem em andamento', async () => {
+    const userId = nextUserId();
+    const session = {
+      sessionId: 'sess-fila-4',
+      _messageQueue: ['msg-restante'],
+      _processingQueue: true,
+      userId,
+    };
+    const sm = createSessionManager({ getByThreadResult: session });
+    const interaction = createInteraction({ commandName: 'queue', userId, options: { _subcommand: 'clear' } });
+
+    await handleCommand(interaction, sm);
+
+    expect(session._messageQueue).toHaveLength(0);
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('1 mensagem já está sendo processada') }),
+    );
+  });
+});
+
+// ─── handleCommand — /status com fila ────────────────────────────────────────
+
+describe('handleCommand() — /status com fila', () => {
+  beforeEach(() => {
+    mockConfigState.allowedUsers = [];
+    mockConfigState.maxGlobalSessions = 0;
+    _resetProjectsCache();
+  });
+
+  it('/status — getQueueSize > 0 → embed contém campo "📮 Fila"', async () => {
+    const session = {
+      sessionId: 'sess-st-queue',
+      getQueueSize: vi.fn().mockReturnValue(3),
+      toSummary: vi.fn().mockReturnValue({
+        sessionId: 'sess-st-queue',
+        project: 'proj',
+        status: 'running',
+        userId: 'u1',
+        projectPath: '/projetos/proj',
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+      }),
+    };
+    const sm = createSessionManager({ getByThreadResult: session });
+    const interaction = createInteraction({ commandName: 'status' });
+
+    await handleCommand(interaction, sm);
+
+    const payload = interaction.reply.mock.calls[0][0];
+    const embed = payload.embeds[0];
+    const filaField = embed.data.fields.find((f) => f.name === '📮 Fila');
+    expect(filaField).toBeDefined();
+    expect(filaField.value).toBe('3 mensagem(s) aguardando');
   });
 });
 

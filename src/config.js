@@ -37,9 +37,6 @@ export const OPENCODE_BASE_PORT = parseInt(process.env.OPENCODE_BASE_PORT || '41
 /** Timeout padrão para chamadas HTTP ao opencode (ms) */
 export const DEFAULT_TIMEOUT_MS = parseInt(process.env.OPENCODE_TIMEOUT_MS || '10000', 10);
 
-/** Lista de modelos de IA disponíveis para seleção no autocomplete */
-export const AVAILABLE_MODELS = (process.env.AVAILABLE_MODELS || 'anthropic/claude-sonnet-4-5,openai/gpt-4o,google/gemini-2.0-flash').split(',');
-
 /** Modelo de IA padrão (vazio = usa o padrão configurado no opencode) */
 export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || '';
 

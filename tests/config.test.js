@@ -286,20 +286,6 @@ describe('constantes de configuração — valores padrão e env', () => {
     expect(result.error).toContain('inválido');
   });
 
-  // ─── AVAILABLE_MODELS ───────────────────────────────────────────────────────
-
-  it('AVAILABLE_MODELS contém anthropic/claude-sonnet-4-5 por padrão', async () => {
-    vi.stubEnv('AVAILABLE_MODELS', '');
-    const { AVAILABLE_MODELS } = await import('../src/config.js');
-    expect(AVAILABLE_MODELS).toContain('anthropic/claude-sonnet-4-5');
-  });
-
-  it('AVAILABLE_MODELS divide env var separada por vírgula', async () => {
-    vi.stubEnv('AVAILABLE_MODELS', 'modelo-a,modelo-b');
-    const { AVAILABLE_MODELS } = await import('../src/config.js');
-    expect(AVAILABLE_MODELS).toEqual(['modelo-a', 'modelo-b']);
-  });
-
   // ─── DEFAULT_MODEL ──────────────────────────────────────────────────────────
 
   it('DEFAULT_MODEL usa string vazia como padrão', async () => {

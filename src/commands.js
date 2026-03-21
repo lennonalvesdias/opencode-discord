@@ -18,7 +18,8 @@ import { spawn } from 'node:child_process';
 import { StreamHandler } from './stream-handler.js';
 import { formatAge, debug } from './utils.js';
 import { listOpenCodeCommands } from './opencode-commands.js';
-import { PROJECTS_BASE, ALLOWED_USERS, validateProjectPath, MAX_SESSIONS_PER_USER, ALLOW_SHARED_SESSIONS, MAX_GLOBAL_SESSIONS, AVAILABLE_MODELS, DEFAULT_MODEL, MAX_SESSIONS_PER_PROJECT } from './config.js';
+import { PROJECTS_BASE, ALLOWED_USERS, validateProjectPath, MAX_SESSIONS_PER_USER, ALLOW_SHARED_SESSIONS, MAX_GLOBAL_SESSIONS, DEFAULT_MODEL, MAX_SESSIONS_PER_PROJECT } from './config.js';
+import { getAvailableModels } from './model-loader.js';
 import { RateLimiter } from './rate-limiter.js';
 import { audit } from './audit.js';
 
@@ -108,16 +109,16 @@ export const commandDefinitions = [
     .setName('plan')
     .setDescription('Inicia uma sessão de planejamento (agent plan) em um projeto')
     .addStringOption((o) =>
-      o.setName('projeto')
+      o.setName('project')
        .setDescription('Nome da pasta do projeto')
        .setRequired(false)
        .setAutocomplete(true)
-    )
-    .addStringOption((o) =>
-      o.setName('prompt').setDescription('Descrição inicial da tarefa').setRequired(false)
-    )
-    .addStringOption((o) =>
-      o.setName('modelo')
+     )
+     .addStringOption((o) =>
+       o.setName('prompt').setDescription('Descrição inicial da tarefa').setRequired(false)
+     )
+     .addStringOption((o) =>
+       o.setName('model')
        .setDescription('Modelo de IA a usar (opcional)')
        .setAutocomplete(true)
        .setRequired(false)
@@ -127,23 +128,23 @@ export const commandDefinitions = [
     .setName('build')
     .setDescription('Inicia uma sessão de desenvolvimento (agent build) em um projeto')
     .addStringOption((o) =>
-      o.setName('projeto')
+      o.setName('project')
        .setDescription('Nome da pasta do projeto')
        .setRequired(false)
        .setAutocomplete(true)
-    )
-    .addStringOption((o) =>
-      o.setName('prompt').setDescription('Descrição do que deve ser desenvolvido').setRequired(false)
-    )
-    .addStringOption((o) =>
-      o.setName('modelo')
+     )
+     .addStringOption((o) =>
+       o.setName('prompt').setDescription('Descrição do que deve ser desenvolvido').setRequired(false)
+     )
+     .addStringOption((o) =>
+       o.setName('model')
        .setDescription('Modelo de IA a usar (opcional)')
        .setAutocomplete(true)
        .setRequired(false)
     ),
 
   new SlashCommandBuilder()
-    .setName('sessoes')
+    .setName('sessions')
     .setDescription('Lista todas as sessões OpenCode ativas'),
 
   new SlashCommandBuilder()
@@ -151,22 +152,22 @@ export const commandDefinitions = [
     .setDescription('Mostra o status da sessão na thread atual'),
 
   new SlashCommandBuilder()
-    .setName('parar')
+    .setName('stop')
     .setDescription('Encerra a sessão OpenCode na thread atual'),
 
   new SlashCommandBuilder()
-    .setName('projetos')
+    .setName('projects')
     .setDescription('Lista os projetos disponíveis em PROJECTS_BASE_PATH'),
 
   new SlashCommandBuilder()
-    .setName('historico')
+    .setName('history')
     .setDescription('Baixa o output completo da sessão como arquivo de texto'),
 
   new SlashCommandBuilder()
-    .setName('comando')
+    .setName('command')
     .setDescription('Executa um comando opencode personalizado na sessão atual')
     .addStringOption((o) =>
-      o.setName('nome')
+      o.setName('name')
        .setDescription('Nome do comando a executar')
        .setRequired(true)
        .setAutocomplete(true)
@@ -184,6 +185,20 @@ export const commandDefinitions = [
   new SlashCommandBuilder()
     .setName('passthrough')
     .setDescription('Ativa ou desativa o encaminhamento automático de mensagens para o agente'),
+
+  new SlashCommandBuilder()
+    .setName('queue')
+    .setDescription('Gerencia a fila de mensagens da sessão na thread atual')
+    .addSubcommand((sub) =>
+      sub
+        .setName('view')
+        .setDescription('Lista as mensagens aguardando na fila')
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('clear')
+        .setDescription('Remove todas as mensagens da fila de espera')
+    ),
 ].map((c) => c.toJSON());
 
 // ─── Handler de comandos ──────────────────────────────────────────────────────
@@ -217,22 +232,24 @@ export async function handleCommand(interaction, sessionManager) {
 
   if (commandName === 'plan' || commandName === 'build') {
     await handleStartSession(interaction, sessionManager, commandName);
-  } else if (commandName === 'sessoes') {
+  } else if (commandName === 'sessions') {
     await handleListSessions(interaction, sessionManager);
   } else if (commandName === 'status') {
     await handleStatus(interaction, sessionManager);
-  } else if (commandName === 'parar') {
+  } else if (commandName === 'stop') {
     await handleStop(interaction, sessionManager);
-  } else if (commandName === 'projetos') {
+  } else if (commandName === 'projects') {
     await handleListProjects(interaction);
-  } else if (commandName === 'historico') {
+  } else if (commandName === 'history') {
     await handleHistory(interaction, sessionManager);
-  } else if (commandName === 'comando') {
+  } else if (commandName === 'command') {
     await handleRunCommand(interaction, sessionManager);
   } else if (commandName === 'diff') {
     await handleDiffCommand(interaction, sessionManager);
   } else if (commandName === 'passthrough') {
     await handlePassthrough(interaction, sessionManager);
+  } else if (commandName === 'queue') {
+    await handleFila(interaction, sessionManager);
   }
 }
 
@@ -245,10 +262,10 @@ export async function handleCommand(interaction, sessionManager) {
 export async function handleAutocomplete(interaction) {
   const { commandName } = interaction;
 
-  // Autocomplete de nome de comando para /comando
-  if (commandName === 'comando') {
+  // Autocomplete de nome de comando para /command
+  if (commandName === 'command') {
     const focusedOption = interaction.options.getFocused(true);
-    if (focusedOption.name === 'nome') {
+    if (focusedOption.name === 'name') {
       await handleCommandoAutocomplete(interaction, focusedOption.value);
     }
     return;
@@ -257,8 +274,8 @@ export async function handleAutocomplete(interaction) {
   // Autocomplete de modelo para /plan e /build
   if (commandName === 'plan' || commandName === 'build') {
     const focused = interaction.options.getFocused(true);
-    if (focused.name === 'modelo') {
-      const models = AVAILABLE_MODELS.filter((m) => m.startsWith(focused.value));
+    if (focused.name === 'model') {
+      const models = getAvailableModels().filter((m) => m.startsWith(focused.value));
       await interaction.respond(models.slice(0, 25).map((m) => ({ name: m, value: m })));
       return;
     }
@@ -283,9 +300,9 @@ export async function handleAutocomplete(interaction) {
  * @param {'plan'|'build'} mode
  */
 async function handleStartSession(interaction, sessionManager, mode) {
-  let projectName = interaction.options.getString('projeto');
+  let projectName = interaction.options.getString('project');
   const promptText = interaction.options.getString('prompt');
-  const modelOption = interaction.options.getString('modelo') || DEFAULT_MODEL;
+  const modelOption = interaction.options.getString('model') || DEFAULT_MODEL;
 
   // S-03: Validações de tamanho de input (antes do defer para respostas ephemeral limpas)
   if (projectName && projectName.length > 256) {
@@ -345,7 +362,7 @@ async function handleStartSession(interaction, sessionManager, mode) {
     .filter((s) => s.status !== 'finished' && s.status !== 'error');
   if (userSessions.length >= MAX_SESSIONS_PER_USER) {
     return interaction.editReply(
-      `⚠️ Limite de ${MAX_SESSIONS_PER_USER} sessões ativas atingido. Encerre uma sessão existente com \`/parar\`.`
+      `⚠️ Limite de ${MAX_SESSIONS_PER_USER} sessões ativas atingido. Encerre uma sessão existente com \`/stop\`.`
     );
   }
 
@@ -362,7 +379,7 @@ async function handleStartSession(interaction, sessionManager, mode) {
   const existing = sessionManager.getByProject(projectPath);
   if (existing) {
     return interaction.editReply(
-      `⚠️ Já existe uma sessão ativa para \`${projectName}\` nesta thread: <#${existing.threadId}>. Encerre-a primeiro com \`/parar\`.`
+      `⚠️ Já existe uma sessão ativa para \`${projectName}\` nesta thread: <#${existing.threadId}>. Encerre-a primeiro com \`/stop\`.`
     );
   }
 
@@ -428,6 +445,7 @@ async function handleStatus(interaction, sessionManager) {
   }
 
   const s = session.toSummary();
+  const queueSize = session.getQueueSize();
 
   const embed = new EmbedBuilder()
     .setTitle(`${STATUS_EMOJI[s.status] || '❓'} Status da Sessão`)
@@ -441,6 +459,10 @@ async function handleStatus(interaction, sessionManager) {
     )
     .setColor(s.status === 'error' ? 0xff0000 : s.status === 'finished' ? 0x00ff00 : 0x5865f2)
     .setTimestamp();
+
+  if (queueSize > 0) {
+    embed.addFields({ name: '📮 Fila', value: `${queueSize} mensagem(s) aguardando`, inline: true });
+  }
 
   await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
@@ -561,7 +583,7 @@ async function handleHistory(interaction, sessionManager) {
  * @param {import('./session-manager.js').SessionManager} sessionManager
  */
 async function handleRunCommand(interaction, sessionManager) {
-  const commandName = interaction.options.getString('nome', true);
+  const commandName = interaction.options.getString('name', true);
   const args = interaction.options.getString('args') ?? '';
 
   // Verifica se estamos em uma thread com sessão ativa
@@ -683,12 +705,65 @@ async function handlePassthrough(interaction, sessionManager) {
   const enabled = session.togglePassthrough();
   const content = enabled
     ? '✅ Passthrough **ativado** — mensagens serão enviadas automaticamente ao agente'
-    : '⏸️ Passthrough **desativado** — use `/comando` para enviar mensagens manualmente';
+    : '⏸️ Passthrough **desativado** — use `/command` para enviar mensagens manualmente';
 
   await interaction.reply({ content, flags: MessageFlags.Ephemeral });
 }
 
 // ─── Handler de interações (select menus, botões) ─────────────────────────────
+
+/**
+ * Gerencia a fila de mensagens da sessão na thread atual.
+ * Subcomandos: `ver` lista as mensagens pendentes; `limpar` remove todas da fila.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handleFila(interaction, sessionManager) {
+  const session = sessionManager.getByThread(interaction.channelId);
+
+  if (!session) {
+    return replyError(interaction, 'Nenhuma sessão ativa nesta thread.');
+  }
+
+  const subcommand = interaction.options.getSubcommand();
+
+  if (subcommand === 'view') {
+    const queue = session._messageQueue;
+    if (queue.length === 0) {
+      return interaction.reply({ content: '📮 Nenhuma mensagem na fila.', flags: MessageFlags.Ephemeral });
+    }
+
+    const lines = queue.map((msg, i) => `**${i + 1}.** ${msg.slice(0, 100)}${msg.length > 100 ? '...' : ''}`);
+    return interaction.reply({
+      content: `📮 **Fila de mensagens (${queue.length}):**\n${lines.join('\n')}`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  if (subcommand === 'clear') {
+    // Verifica ownership
+    if (!ALLOW_SHARED_SESSIONS && session.userId !== interaction.user.id) {
+      return replyError(interaction, 'Apenas o criador da sessão pode limpar a fila.');
+    }
+
+    if (session._processingQueue) {
+      // Uma mensagem já está sendo processada (fora da fila); remove apenas as restantes
+      const remaining = session._messageQueue.length;
+      session._messageQueue = [];
+      return interaction.reply({
+        content: `⚠️ 1 mensagem já está sendo processada. As demais (${remaining}) foram removidas da fila.`,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
+    const total = session._messageQueue.length;
+    session._messageQueue = [];
+    return interaction.reply({
+      content: `✅ Fila limpa. ${total} mensagem(s) removida(s).`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}
 
 /**
  * Processa interações de select menu e botões
@@ -715,7 +790,7 @@ export async function handleInteraction(interaction, sessionManager) {
     const existing = sessionManager.getByProject(projectPath);
     if (existing) {
       return interaction.editReply({
-        content: `⚠️ Já existe uma sessão ativa para \`${projectName}\` nesta thread: <#${existing.threadId}>. Encerre-a primeiro com \`/parar\`.`,
+        content: `⚠️ Já existe uma sessão ativa para \`${projectName}\` nesta thread: <#${existing.threadId}>. Encerre-a primeiro com \`/stop\`.`,
         components: [],
       });
     }
@@ -915,7 +990,7 @@ function buildSessionEmbed({ mode, projectName, projectPath, session }) {
       `**Como usar:**\n` +
       `• Digite sua mensagem aqui para interagir com o agente\n` +
       `• Use \`/status\` para ver o estado da sessão\n` +
-      `• Use \`/parar\` para encerrar\n\n` +
+      `• Use \`/stop\` para encerrar\n\n` +
       `⚙️ Inicializando \`opencode\`...`
     )
     .addFields(
