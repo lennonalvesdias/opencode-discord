@@ -12,14 +12,14 @@ Ao participar neste projeto, concordas em manter um ambiente respeitoso, inclusi
 
 ### 1. Reportar Bugs
 
-Encontraste algo que não funciona?
+Encontrou algo que não funciona?
 
 - Verifica se já existe uma *Issue* aberta sobre o problema.
 - Se não, abre uma nova *Issue* detalhando o erro, passos para reproduzir e o seu ambiente (SO/Node version).
 
 ### 2. Sugerir Funcionalidades
 
-Tens uma ideia para tornar o fluxo remoto ainda melhor?
+Tem uma ideia para tornar o fluxo remoto ainda melhor?
 
 - Abre uma *Issue* com a tag `enhancement`.
 - Explica o "porquê" da funcionalidade e como ela ajudaria outros utilizadores.
@@ -29,7 +29,7 @@ Tens uma ideia para tornar o fluxo remoto ainda melhor?
 1. Faz um **Fork** do repositório.
 2. Cria uma **Branch** para a tua alteração (`git checkout -b feature/nome-da-feature`).
 3. Mantém o estilo de código existente.
-4. Garante que a documentação é atualizada se necessário.
+4. Garante que a documentação é atualizada, se necessário.
 5. Envia o **Pull Request** para a branch `main`.
 
 ## 💻 Configuração de Desenvolvimento Local
