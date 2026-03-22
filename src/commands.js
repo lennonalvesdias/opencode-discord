@@ -18,12 +18,17 @@ import { spawn } from 'node:child_process';
 import { StreamHandler } from './stream-handler.js';
 import { formatAge, debug } from './utils.js';
 import { listOpenCodeCommands } from './opencode-commands.js';
-import { PROJECTS_BASE, ALLOWED_USERS, validateProjectPath, MAX_SESSIONS_PER_USER, ALLOW_SHARED_SESSIONS, MAX_GLOBAL_SESSIONS, DEFAULT_MODEL, MAX_SESSIONS_PER_PROJECT } from './config.js';
+import { PROJECTS_BASE, ALLOWED_USERS, validateProjectPath, MAX_SESSIONS_PER_USER, ALLOW_SHARED_SESSIONS, MAX_GLOBAL_SESSIONS, DEFAULT_MODEL, MAX_SESSIONS_PER_PROJECT, GITHUB_TOKEN, GITHUB_DEFAULT_OWNER, GITHUB_DEFAULT_REPO, GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL } from './config.js';
 import { getAvailableModels } from './model-loader.js';
 import { RateLimiter } from './rate-limiter.js';
 import { audit } from './audit.js';
+import { getGitHubClient } from './github.js';
+import { getRepoInfo, hasChanges, createBranchAndCommit, pushBranch } from './git.js';
 
 const commandRateLimiter = new RateLimiter({ maxActions: 5, windowMs: 60_000 });
+
+/** Contextos de review pendentes (sessionId → metadados do PR) — usados pelo botão "Publicar Review" */
+const _reviewContexts = new Map();
 
 /**
  * Retorna estatísticas do rate limiter de comandos.
@@ -199,6 +204,81 @@ export const commandDefinitions = [
         .setName('clear')
         .setDescription('Remove todas as mensagens da fila de espera')
     ),
+
+  new SlashCommandBuilder()
+    .setName('pr')
+    .setDescription('Operações de Pull Request no GitHub')
+    .addSubcommand((sub) =>
+      sub
+        .setName('create')
+        .setDescription('Cria um Pull Request a partir das mudanças da sessão atual')
+        .addStringOption((o) => o.setName('title').setDescription('Título do PR (opcional)').setRequired(false))
+        .addStringOption((o) => o.setName('base').setDescription('Branch de destino (padrão: main)').setRequired(false))
+        .addStringOption((o) => o.setName('branch').setDescription('Nome do branch a criar (auto-gerado se omitido)').setRequired(false))
+        .addBooleanOption((o) => o.setName('draft').setDescription('Criar como rascunho (padrão: false)').setRequired(false))
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('list')
+        .setDescription('Lista Pull Requests do projeto')
+        .addStringOption((o) =>
+          o.setName('project').setDescription('Nome do projeto').setRequired(false).setAutocomplete(true)
+        )
+        .addStringOption((o) =>
+          o
+            .setName('state')
+            .setDescription('Estado dos PRs (padrão: abertos)')
+            .setRequired(false)
+            .addChoices(
+              { name: 'Abertos', value: 'open' },
+              { name: 'Fechados', value: 'closed' },
+              { name: 'Todos', value: 'all' },
+            )
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('review')
+        .setDescription('Inicia uma revisão de PR com o agente plan')
+        .addIntegerOption((o) =>
+          o.setName('number').setDescription('Número do PR a revisar').setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName('project').setDescription('Nome do projeto (usa a thread atual se omitido)').setRequired(false).setAutocomplete(true)
+        )
+        .addStringOption((o) =>
+          o.setName('model').setDescription('Modelo de IA a usar (opcional)').setRequired(false).setAutocomplete(true)
+        )
+    ),
+
+  new SlashCommandBuilder()
+    .setName('issue')
+    .setDescription('Operações com Issues do GitHub')
+    .addSubcommand((sub) =>
+      sub
+        .setName('list')
+        .setDescription('Lista issues abertas do projeto')
+        .addStringOption((o) =>
+          o.setName('project').setDescription('Nome do projeto').setRequired(false).setAutocomplete(true)
+        )
+        .addStringOption((o) =>
+          o.setName('label').setDescription('Filtrar por label (opcional)').setRequired(false)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName('implement')
+        .setDescription('Implementa uma issue do GitHub com o agente build')
+        .addIntegerOption((o) =>
+          o.setName('number').setDescription('Número da issue').setRequired(true)
+        )
+        .addStringOption((o) =>
+          o.setName('project').setDescription('Nome do projeto').setRequired(true).setAutocomplete(true)
+        )
+        .addStringOption((o) =>
+          o.setName('model').setDescription('Modelo de IA a usar (opcional)').setRequired(false).setAutocomplete(true)
+        )
+    ),
 ].map((c) => c.toJSON());
 
 // ─── Handler de comandos ──────────────────────────────────────────────────────
@@ -250,6 +330,10 @@ export async function handleCommand(interaction, sessionManager) {
     await handlePassthrough(interaction, sessionManager);
   } else if (commandName === 'queue') {
     await handleFila(interaction, sessionManager);
+  } else if (commandName === 'pr') {
+    await handlePrCommand(interaction, sessionManager);
+  } else if (commandName === 'issue') {
+    await handleIssueCommand(interaction, sessionManager);
   }
 }
 
@@ -269,6 +353,26 @@ export async function handleAutocomplete(interaction) {
       await handleCommandoAutocomplete(interaction, focusedOption.value);
     }
     return;
+  }
+
+  // Autocomplete de modelo e projeto para /pr e /issue
+  if (commandName === 'pr' || commandName === 'issue') {
+    const focused = interaction.options.getFocused(true);
+    if (focused.name === 'model') {
+      const models = getAvailableModels().filter((m) => m.startsWith(focused.value));
+      await interaction.respond(models.slice(0, 25).map((m) => ({ name: m, value: m })));
+      return;
+    }
+    if (focused.name === 'project') {
+      const focusedVal = focused.value.toLowerCase();
+      const projects = await getProjects();
+      const filtered = projects
+        .filter((p) => p.toLowerCase().includes(focusedVal))
+        .slice(0, 25)
+        .map((p) => ({ name: p, value: p }));
+      await interaction.respond(filtered);
+      return;
+    }
   }
 
   // Autocomplete de modelo para /plan e /build
@@ -710,6 +814,472 @@ async function handlePassthrough(interaction, sessionManager) {
   await interaction.reply({ content, flags: MessageFlags.Ephemeral });
 }
 
+// ─── GitHub — helpers internos ────────────────────────────────────────────────
+
+/**
+ * Resolve owner e repo a partir do caminho do projeto ou das configurações padrão.
+ * @param {string} projectPath - Caminho absoluto do projeto
+ * @returns {Promise<{ owner: string, repo: string }>}
+ */
+async function resolveRepoContext(projectPath) {
+  try {
+    const info = await getRepoInfo(projectPath);
+    return { owner: info.owner, repo: info.repo };
+  } catch {
+    if (GITHUB_DEFAULT_OWNER && GITHUB_DEFAULT_REPO) {
+      return { owner: GITHUB_DEFAULT_OWNER, repo: GITHUB_DEFAULT_REPO };
+    }
+    throw new Error(
+      'Não foi possível detectar o repositório GitHub. ' +
+        'Configure `GITHUB_DEFAULT_OWNER` e `GITHUB_DEFAULT_REPO` no .env, ' +
+        'ou verifique se o projeto tem um remote "origin" apontando para o GitHub.',
+    );
+  }
+}
+
+// ─── GitHub — /pr ────────────────────────────────────────────────────────────
+
+/**
+ * Despacha subcomandos do /pr.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handlePrCommand(interaction, sessionManager) {
+  const subcommand = interaction.options.getSubcommand();
+  if (subcommand === 'create') await handlePrCreate(interaction, sessionManager);
+  else if (subcommand === 'list') await handlePrList(interaction, sessionManager);
+  else if (subcommand === 'review') await handlePrReview(interaction, sessionManager);
+}
+
+/**
+ * Cria branch, commit, push e Pull Request a partir das mudanças da sessão atual.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handlePrCreate(interaction, sessionManager) {
+  if (!GITHUB_TOKEN) {
+    return replyError(interaction, 'GITHUB_TOKEN não configurado. Adicione ao arquivo .env.');
+  }
+
+  const session = sessionManager.getByThread(interaction.channelId);
+  if (!session) {
+    return replyError(interaction, 'Nenhuma sessão ativa nesta thread. Use `/plan` ou `/build` primeiro.');
+  }
+
+  try {
+    await interaction.deferReply();
+  } catch (err) {
+    if (err.code === 10062) return;
+    throw err;
+  }
+
+  const projectPath = session.projectPath;
+  const projectName = path.basename(projectPath);
+
+  try {
+    const { owner, repo } = await resolveRepoContext(projectPath);
+
+    const changed = await hasChanges(projectPath);
+    if (!changed) {
+      return interaction.editReply('✅ Nenhuma alteração detectada no projeto. Não há nada para incluir no PR.');
+    }
+
+    const titleOption = interaction.options.getString('title');
+    const baseOption = interaction.options.getString('base') || 'main';
+    const branchOption = interaction.options.getString('branch');
+    const isDraft = interaction.options.getBoolean('draft') ?? false;
+
+    const shortId = session.sessionId.slice(-6);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const branchName = branchOption || `rf/${dateStr}-${shortId}`;
+    const title = titleOption || `feat: mudanças da sessão ${session.agent} (${shortId})`;
+    const commitMsg = `feat: changes from RemoteFlow ${session.agent} session ${shortId}`;
+
+    const lastOutput = (session.outputBuffer || '').slice(-800).trim();
+    const prBody = [
+      `## 📋 Contexto`,
+      `Criado automaticamente pelo **RemoteFlow** a partir de uma sessão \`${session.agent}\`.`,
+      ``,
+      `| Campo | Valor |`,
+      `|---|---|`,
+      `| Projeto | \`${projectName}\` |`,
+      `| Sessão | \`${session.sessionId.slice(-8)}\` |`,
+      `| Agente | \`${session.agent}\` |`,
+      ``,
+      lastOutput ? `## 📝 Resumo da Sessão\n\`\`\`\n${lastOutput}\n\`\`\`` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    await createBranchAndCommit({
+      cwd: projectPath,
+      branchName,
+      commitMsg,
+      authorName: GIT_AUTHOR_NAME,
+      authorEmail: GIT_AUTHOR_EMAIL,
+    });
+
+    await pushBranch({ cwd: projectPath, branchName, token: GITHUB_TOKEN, owner, repo });
+
+    const gh = getGitHubClient();
+    const pr = await gh.createPullRequest({ owner, repo, head: branchName, base: baseOption, title, body: prBody, draft: isDraft });
+
+    await audit('pr.create', { owner, repo, number: pr.number, branch: branchName }, interaction.user.id, session.sessionId);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🔀 Pull Request Criado — #${pr.number}`)
+      .setURL(pr.html_url)
+      .setDescription(title)
+      .addFields(
+        { name: 'Repositório', value: `\`${owner}/${repo}\``, inline: true },
+        { name: 'Branch', value: `\`${branchName}\` → \`${baseOption}\``, inline: true },
+        { name: 'Estado', value: isDraft ? '📝 Rascunho' : '🟢 Aberto', inline: true },
+        { name: 'Link', value: pr.html_url, inline: false },
+      )
+      .setColor(0x6e40c9)
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+  } catch (err) {
+    console.error('[commands] ❌ Erro ao criar PR:', err.message);
+    await interaction.editReply(`❌ Erro ao criar Pull Request: ${err.message}`);
+  }
+}
+
+/**
+ * Lista Pull Requests abertos do repositório associado ao projeto.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handlePrList(interaction, sessionManager) {
+  if (!GITHUB_TOKEN) {
+    return replyError(interaction, 'GITHUB_TOKEN não configurado. Adicione ao arquivo .env.');
+  }
+
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    if (err.code === 10062) return;
+    throw err;
+  }
+
+  const projectOption = interaction.options.getString('project');
+  const state = interaction.options.getString('state') || 'open';
+
+  let projectPath;
+  if (projectOption) {
+    const { valid, projectPath: pp, error } = validateAndGetProjectPath(projectOption);
+    if (!valid) return interaction.editReply(error);
+    projectPath = pp;
+  } else {
+    const session = sessionManager.getByThread(interaction.channelId);
+    if (!session) {
+      return interaction.editReply('❌ Nenhuma sessão nesta thread. Especifique o projeto com a opção `project`.');
+    }
+    projectPath = session.projectPath;
+  }
+
+  try {
+    const { owner, repo } = await resolveRepoContext(projectPath);
+    const gh = getGitHubClient();
+    const prs = await gh.listPullRequests({ owner, repo, state, perPage: 15 });
+
+    if (prs.length === 0) {
+      const stateLabel = state === 'open' ? 'aberto' : state === 'closed' ? 'fechado' : '';
+      return interaction.editReply(`📭 Nenhum PR ${stateLabel} encontrado em \`${owner}/${repo}\`.`);
+    }
+
+    const stateEmoji = { open: '🟢', closed: '🔴', all: '📋' };
+    const lines = prs.map((pr) => {
+      const emoji = pr.state === 'open' ? '🟢' : '🔴';
+      const draft = pr.draft ? ' 📝' : '';
+      return `${emoji}${draft} **#${pr.number}** [${pr.title.slice(0, 55)}](${pr.html_url}) — @${pr.user.login}`;
+    });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${stateEmoji[state] || '📋'} Pull Requests — ${owner}/${repo}`)
+      .setDescription(lines.join('\n'))
+      .setColor(0x6e40c9)
+      .setFooter({ text: `${prs.length} PR(s) · ${state}` })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+  } catch (err) {
+    console.error('[commands] ❌ Erro ao listar PRs:', err.message);
+    await interaction.editReply(`❌ Erro ao listar Pull Requests: ${err.message}`);
+  }
+}
+
+/**
+ * Inicia uma sessão plan para revisar um PR do GitHub.
+ * Ao finalizar, oferece botão para publicar o review no repositório.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handlePrReview(interaction, sessionManager) {
+  if (!GITHUB_TOKEN) {
+    return replyError(interaction, 'GITHUB_TOKEN não configurado. Adicione ao arquivo .env.');
+  }
+
+  const prNumber = interaction.options.getInteger('number', true);
+  const projectOption = interaction.options.getString('project');
+  const modelOption = interaction.options.getString('model') || DEFAULT_MODEL;
+
+  try {
+    await interaction.deferReply();
+  } catch (err) {
+    if (err.code === 10062) return;
+    throw err;
+  }
+
+  let projectPath, projectName;
+  if (projectOption) {
+    const { valid, projectPath: pp, error } = validateAndGetProjectPath(projectOption);
+    if (!valid) return interaction.editReply(error);
+    projectPath = pp;
+    projectName = projectOption;
+  } else {
+    const session = sessionManager.getByThread(interaction.channelId);
+    if (!session) {
+      return interaction.editReply('❌ Nenhuma sessão nesta thread. Especifique o projeto com a opção `project`.');
+    }
+    projectPath = session.projectPath;
+    projectName = path.basename(projectPath);
+  }
+
+  try {
+    const { owner, repo } = await resolveRepoContext(projectPath);
+    const gh = getGitHubClient();
+    const pr = await gh.getPullRequest({ owner, repo, number: prNumber });
+
+    let diffText = '';
+    try {
+      diffText = await gh.getPullRequestDiff({ owner, repo, number: prNumber });
+      if (diffText.length > 80_000) {
+        diffText = diffText.slice(0, 80_000) + '\n\n... [diff truncado — muito grande para exibição completa]';
+      }
+    } catch {
+      diffText = '(não foi possível obter o diff)';
+    }
+
+    const files = await gh.getPullRequestFiles({ owner, repo, number: prNumber });
+    const fileList = files.map((f) => `• \`${f.filename}\` (+${f.additions}/-${f.deletions})`).join('\n');
+
+    const prompt = [
+      `Revise o seguinte Pull Request do GitHub:`,
+      ``,
+      `## PR #${pr.number}: ${pr.title}`,
+      `**Autor:** ${pr.user.login} | **Base:** \`${pr.base.ref}\` ← \`${pr.head.ref}\``,
+      `**Commits:** ${pr.commits} | **Adições:** +${pr.additions} | **Remoções:** -${pr.deletions}`,
+      ``,
+      pr.body ? `**Descrição:**\n${pr.body}\n` : '',
+      `## Arquivos alterados (${files.length}):`,
+      fileList,
+      ``,
+      `## Diff:`,
+      '```diff',
+      diffText,
+      '```',
+      ``,
+      `---`,
+      `Analise o código e forneça uma revisão completa em português com:`,
+      `1. **Resumo** das mudanças implementadas`,
+      `2. **Problemas encontrados** (bugs, segurança, performance, boas práticas)`,
+      `3. **Sugestões de melhoria** com exemplos de código quando relevante`,
+      `4. **Veredicto final**: APPROVE (aprovado), REQUEST_CHANGES (mudanças necessárias) ou COMMENT (observações sem bloquear merge)`,
+    ]
+      .filter((s) => s !== undefined)
+      .join('\n');
+
+    const { thread, session } = await createSessionInThread({
+      interaction,
+      sessionManager,
+      projectPath,
+      projectName,
+      mode: 'plan',
+      model: modelOption,
+    });
+
+    _reviewContexts.set(session.sessionId, {
+      owner,
+      repo,
+      number: prNumber,
+      commitId: pr.head.sha,
+    });
+
+    await session.sendMessage(prompt);
+
+    // Quando a sessão fechar, envia botão para publicar o review
+    session.once('close', async () => {
+      try {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`publish_review_${session.sessionId}`)
+            .setLabel('📤 Publicar Review no GitHub')
+            .setStyle(ButtonStyle.Primary),
+        );
+        await thread.send({
+          content: `🔍 Revisão do **PR #${prNumber}** concluída! Clique para publicar no GitHub:`,
+          components: [row],
+        });
+      } catch (err) {
+        console.error('[commands] ⚠️ Erro ao enviar botão de review:', err.message);
+      }
+    });
+
+    await audit('pr.review', { owner, repo, prNumber }, interaction.user.id, session.sessionId);
+
+    await interaction.editReply(
+      `🔍 Revisão do **PR #${prNumber}** iniciada para \`${projectName}\`!\n👉 Acesse a thread: ${thread}`,
+    );
+  } catch (err) {
+    console.error('[commands] ❌ Erro ao iniciar review:', err.message);
+    await interaction.editReply(`❌ Erro ao iniciar revisão do PR: ${err.message}`);
+  }
+}
+
+// ─── GitHub — /issue ─────────────────────────────────────────────────────────
+
+/**
+ * Despacha subcomandos do /issue.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handleIssueCommand(interaction, sessionManager) {
+  const subcommand = interaction.options.getSubcommand();
+  if (subcommand === 'list') await handleIssueList(interaction, sessionManager);
+  else if (subcommand === 'implement') await handleIssueImplement(interaction, sessionManager);
+}
+
+/**
+ * Lista issues abertas do repositório associado ao projeto.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handleIssueList(interaction, sessionManager) {
+  if (!GITHUB_TOKEN) {
+    return replyError(interaction, 'GITHUB_TOKEN não configurado. Adicione ao arquivo .env.');
+  }
+
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    if (err.code === 10062) return;
+    throw err;
+  }
+
+  const projectOption = interaction.options.getString('project');
+  const labelFilter = interaction.options.getString('label') || '';
+
+  let projectPath;
+  if (projectOption) {
+    const { valid, projectPath: pp, error } = validateAndGetProjectPath(projectOption);
+    if (!valid) return interaction.editReply(error);
+    projectPath = pp;
+  } else {
+    const session = sessionManager.getByThread(interaction.channelId);
+    if (!session) {
+      return interaction.editReply('❌ Nenhuma sessão nesta thread. Especifique o projeto com a opção `project`.');
+    }
+    projectPath = session.projectPath;
+  }
+
+  try {
+    const { owner, repo } = await resolveRepoContext(projectPath);
+    const gh = getGitHubClient();
+    const issues = await gh.listIssues({ owner, repo, state: 'open', labels: labelFilter, perPage: 15 });
+
+    if (issues.length === 0) {
+      const labelMsg = labelFilter ? ` com a label \`${labelFilter}\`` : '';
+      return interaction.editReply(`📭 Nenhuma issue aberta${labelMsg} encontrada em \`${owner}/${repo}\`.`);
+    }
+
+    const lines = issues.map((issue) => {
+      const labels = issue.labels.map((l) => `\`${l.name}\``).join(' ');
+      return `🐛 **#${issue.number}** [${issue.title.slice(0, 55)}](${issue.html_url}) — @${issue.user.login}${labels ? ' · ' + labels : ''}`;
+    });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🐛 Issues Abertas — ${owner}/${repo}`)
+      .setDescription(lines.join('\n'))
+      .setColor(0xe8472a)
+      .setFooter({ text: `${issues.length} issue(s) · ${labelFilter ? 'label: ' + labelFilter : 'todas'}` })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embed] });
+  } catch (err) {
+    console.error('[commands] ❌ Erro ao listar issues:', err.message);
+    await interaction.editReply(`❌ Erro ao listar issues: ${err.message}`);
+  }
+}
+
+/**
+ * Busca uma issue do GitHub e inicia uma sessão build para implementá-la.
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ */
+async function handleIssueImplement(interaction, sessionManager) {
+  if (!GITHUB_TOKEN) {
+    return replyError(interaction, 'GITHUB_TOKEN não configurado. Adicione ao arquivo .env.');
+  }
+
+  const issueNumber = interaction.options.getInteger('number', true);
+  const projectOption = interaction.options.getString('project', true);
+  const modelOption = interaction.options.getString('model') || DEFAULT_MODEL;
+
+  const { valid, projectPath, error } = validateAndGetProjectPath(projectOption);
+  if (!valid) return replyError(interaction, error);
+
+  try {
+    await interaction.deferReply();
+  } catch (err) {
+    if (err.code === 10062) return;
+    throw err;
+  }
+
+  try {
+    const { owner, repo } = await resolveRepoContext(projectPath);
+    const gh = getGitHubClient();
+    const issue = await gh.getIssue({ owner, repo, number: issueNumber });
+
+    const labels = issue.labels.map((l) => l.name).join(', ') || 'nenhuma';
+    const prompt = [
+      `Implemente a seguinte issue do GitHub:`,
+      ``,
+      `## Issue #${issue.number}: ${issue.title}`,
+      `**Labels:** ${labels}`,
+      `**Autor:** ${issue.user.login}`,
+      ``,
+      issue.body ? issue.body : '(sem descrição)',
+      ``,
+      `---`,
+      `Implemente a solução seguindo as boas práticas do projeto.`,
+      `Ao finalizar, liste os arquivos alterados e descreva o que foi implementado.`,
+      `Quando terminar, use \`/pr create\` para criar um Pull Request com as mudanças.`,
+    ].join('\n');
+
+    const { thread, session } = await createSessionInThread({
+      interaction,
+      sessionManager,
+      projectPath,
+      projectName: projectOption,
+      mode: 'build',
+      model: modelOption,
+    });
+
+    await session.sendMessage(prompt);
+
+    await audit('issue.implement', { owner, repo, issueNumber }, interaction.user.id, session.sessionId);
+
+    await interaction.editReply(
+      `🐛 Implementação da **Issue #${issueNumber}** iniciada para \`${projectOption}\`!\n👉 Acesse a thread: ${thread}\n\n💡 Após a sessão concluir, use \`/pr create\` para criar o Pull Request.`,
+    );
+  } catch (err) {
+    console.error('[commands] ❌ Erro ao iniciar implementação:', err.message);
+    await interaction.editReply(`❌ Erro ao iniciar implementação da issue: ${err.message}`);
+  }
+}
+
 // ─── Handler de interações (select menus, botões) ─────────────────────────────
 
 /**
@@ -824,6 +1394,69 @@ export async function handleInteraction(interaction, sessionManager) {
   // Botão cancelar stop
   if (interaction.customId === 'cancel_stop') {
     await interaction.update({ content: '↩️ Cancelado.', components: [] });
+  }
+
+  // ─── Publicar review no GitHub ────────────────────────────────────────────────
+  if (interaction.customId.startsWith('publish_review_')) {
+    const sessionId = interaction.customId.replace('publish_review_', '');
+    const context = _reviewContexts.get(sessionId);
+    if (!context) {
+      await interaction.reply({ content: '❌ Contexto de review não encontrado. A sessão pode ter expirado.', ephemeral: true });
+      return;
+    }
+    const session = sessionManager.getById(sessionId);
+    const reviewBody = (session?.outputBuffer || '(sem output da revisão)').slice(0, 65536);
+
+    try {
+      await interaction.deferReply({ ephemeral: true });
+    } catch (err) {
+      if (err.code === 10062) return;
+      throw err;
+    }
+
+    try {
+      const gh = getGitHubClient();
+      const upperBody = reviewBody.toUpperCase();
+      let event = 'COMMENT';
+      if (upperBody.includes('APPROVE') || upperBody.includes('APROVAR') || upperBody.includes('APROVADO')) {
+        event = 'APPROVE';
+      } else if (
+        upperBody.includes('REQUEST_CHANGES') ||
+        upperBody.includes('SOLICITAR MUDANÇAS') ||
+        upperBody.includes('MUDANÇAS NECESSÁRIAS')
+      ) {
+        event = 'REQUEST_CHANGES';
+      }
+
+      const review = await gh.createReview({
+        owner: context.owner,
+        repo: context.repo,
+        number: context.number,
+        commitId: context.commitId,
+        body: reviewBody,
+        event,
+      });
+
+      _reviewContexts.delete(sessionId);
+
+      // Desabilita o botão após publicar
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`publish_review_${sessionId}`)
+          .setLabel('✅ Review Publicado')
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(true),
+      );
+      await interaction.message.edit({ components: [row] }).catch(() => {});
+
+      await interaction.editReply(
+        `✅ Review publicado no GitHub!\n🔗 PR #${context.number}: https://github.com/${context.owner}/${context.repo}/pull/${context.number}\n📋 Tipo: **${event}**`,
+      );
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao publicar review:', err.message);
+      await interaction.editReply(`❌ Erro ao publicar review: ${err.message}`);
+    }
+    return;
   }
 
   // ─── Aprovação de Permissão ───────────────────────────────────────────────────

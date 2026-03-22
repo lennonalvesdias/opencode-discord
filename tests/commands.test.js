@@ -42,17 +42,22 @@ vi.mock('../src/config.js', () => ({
   SHUTDOWN_TIMEOUT_MS: 10000,
   CHANNEL_FETCH_TIMEOUT_MS: 2000,
   SERVER_CIRCUIT_BREAKER_COOLDOWN_MS: 60000,
-  DEFAULT_MODEL: '',
-  MAX_SESSIONS_PER_PROJECT: 2,
-  PERMISSION_TIMEOUT_MS: 60000,
-  validateProjectPath: vi.fn((name) => ({
+    DEFAULT_MODEL: '',
+    MAX_SESSIONS_PER_PROJECT: 2,
+    PERMISSION_TIMEOUT_MS: 60000,
+    GITHUB_TOKEN: 'test-token',
+    GITHUB_DEFAULT_OWNER: 'owner',
+    GITHUB_DEFAULT_REPO: 'repo',
+    GIT_AUTHOR_NAME: 'Test Bot',
+    GIT_AUTHOR_EMAIL: 'bot@test.com',
+    validateProjectPath: vi.fn((name) => ({
     valid: true,
     projectPath: '/projetos/' + name,
     error: null,
   })),
 }));
 
-vi.mock('node:child_process', () => ({ spawn: mockSpawn }));
+vi.mock('node:child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
 
 vi.mock('../src/model-loader.js', () => ({
   getAvailableModels: () => ['anthropic/claude-sonnet-4-5', 'openai/gpt-4o'],
@@ -85,6 +90,26 @@ vi.mock('fs/promises', () => ({
 
 vi.mock('../src/audit.js', () => ({
   audit: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../src/github.js', () => ({
+  getGitHubClient: vi.fn(() => ({
+    createPullRequest: vi.fn().mockResolvedValue({ number: 42, html_url: 'https://github.com/owner/repo/pull/42' }),
+    listPullRequests: vi.fn().mockResolvedValue([]),
+    getPullRequest: vi.fn().mockResolvedValue({ number: 1, title: 'Test PR', user: { login: 'user' }, base: { ref: 'main' }, head: { ref: 'feat', sha: 'abc123' }, commits: 1, additions: 10, deletions: 5, body: '' }),
+    getPullRequestDiff: vi.fn().mockResolvedValue('diff --git a/file.js b/file.js'),
+    getPullRequestFiles: vi.fn().mockResolvedValue([]),
+    listIssues: vi.fn().mockResolvedValue([]),
+    getIssue: vi.fn().mockResolvedValue({ number: 1, title: 'Test Issue', user: { login: 'user' }, labels: [], body: 'Issue body' }),
+    createReview: vi.fn().mockResolvedValue({ id: 1 }),
+  })),
+}));
+
+vi.mock('../src/git.js', () => ({
+  getRepoInfo: vi.fn().mockResolvedValue({ owner: 'owner', repo: 'repo' }),
+  hasChanges: vi.fn().mockResolvedValue(true),
+  createBranchAndCommit: vi.fn().mockResolvedValue(undefined),
+  pushBranch: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ─── Imports do módulo sob teste (após os mocks) ──────────────────────────────

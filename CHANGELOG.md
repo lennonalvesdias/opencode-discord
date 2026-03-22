@@ -6,6 +6,26 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.
 
 ---
 
+## [1.4.0] — 2026-03-22
+
+### ✨ Added
+- Integração nativa com GitHub via Octokit
+- Comando `/pr create` — cria branch, commit, push e Pull Request a partir das mudanças da sessão atual
+- Comando `/pr list` — lista Pull Requests abertos do repositório
+- Comando `/pr review` — cria sessão de revisão com agente plan e publica o review no GitHub
+- Comando `/issue list` — lista issues abertas com filtro por label
+- Comando `/issue implement` — busca issue e inicia sessão build com contexto completo
+- Módulo `src/git.js` — utilitários git (branch, commit, push, extração de owner/repo)
+- Módulo `src/github.js` — cliente Octokit para PRs, reviews e issues
+- Variáveis de ambiente: `GITHUB_TOKEN`, `GITHUB_DEFAULT_OWNER`, `GITHUB_DEFAULT_REPO`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`
+- Botão interativo "Publicar Review no GitHub" após conclusão de sessão de revisão
+
+### 🔒 Security
+- Token do GitHub embutido na URL do remote apenas durante o push — URL limpa restaurada no bloco `finally`
+- Diff de PRs truncado em 80KB antes de enviar ao agente de IA
+
+---
+
 ## [1.3.0] - 2026-03-20
 
 ### Adicionado

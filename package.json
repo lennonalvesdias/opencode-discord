@@ -16,6 +16,7 @@
   "dependencies": {
     "discord.js": "^14.18.0",
     "dotenv": "^16.4.5",
+    "octokit": "^5.0.5",
     "strip-ansi": "^7.2.0"
   },
   "engines": {

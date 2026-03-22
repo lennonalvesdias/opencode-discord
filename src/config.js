@@ -95,6 +95,23 @@ export const SERVER_CIRCUIT_BREAKER_COOLDOWN_MS = parseInt(process.env.SERVER_CI
 /** Timeout em ms para aprovação interativa de permissão antes do auto-approve (padrão: 60000) */
 export const PERMISSION_TIMEOUT_MS = parseInt(process.env.PERMISSION_TIMEOUT_MS || '60000', 10);
 
+// ─── GitHub ───────────────────────────────────────────────────────────────────
+
+/** Personal Access Token do GitHub (fine-grained ou classic) */
+export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+
+/** Owner padrão do repositório (fallback quando git remote não está disponível) */
+export const GITHUB_DEFAULT_OWNER = process.env.GITHUB_DEFAULT_OWNER || '';
+
+/** Nome padrão do repositório (fallback quando git remote não está disponível) */
+export const GITHUB_DEFAULT_REPO = process.env.GITHUB_DEFAULT_REPO || '';
+
+/** Nome do autor para commits automáticos criados pelo bot */
+export const GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'RemoteFlow Bot';
+
+/** Email do autor para commits automáticos criados pelo bot */
+export const GIT_AUTHOR_EMAIL = process.env.GIT_AUTHOR_EMAIL || 'bot@remote-flow.local';
+
 // ─── Utilitários ──────────────────────────────────────────────────────────────
 
 /**
