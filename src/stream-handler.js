@@ -3,6 +3,7 @@
 
 import { AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { debug } from './utils.js';
+import { PlannotatorClient } from './plannotator-client.js';
 import { STREAM_UPDATE_INTERVAL as UPDATE_INTERVAL, DISCORD_MSG_LIMIT as MSG_LIMIT, ENABLE_DM_NOTIFICATIONS, STATUS_QUEUE_ITEM_TIMEOUT_MS, THREAD_ARCHIVE_DELAY_MS, PERMISSION_TIMEOUT_MS } from './config.js';
 
 /** Limite para enviar diff inline vs como arquivo anexo */
@@ -36,6 +37,8 @@ export class StreamHandler {
     this.hasOutput = false;
     // Estado da permissão interativa pendente (null = nenhuma aguardando)
     this._pendingPermission = null;
+    // Estado da revisão de plano pendente (null = nenhuma aguardando)
+    this._pendingPlanReview = null;
     this.sentMessages = []; // mensagens anteriores para correção de tabelas no final
     this._pendingTableLines = ''; // linhas de tabela retidas entre flushes
   }
@@ -124,6 +127,26 @@ export class StreamHandler {
         console.error('[StreamHandler] Erro ao enviar aviso de fila descartada:', err.message)
       );
     });
+
+    // Cancela o timer de auto-aprovação quando o usuário interage com os botões de permissão
+    this.session.on('permission-resolved', () => this._clearPendingPermission());
+
+    // Detecta plano pronto para revisão (plannotator aguardando input)
+    this.session.on('plan-ready', (data) => {
+      this._handlePlanReadyEvent(data).catch((err) =>
+        console.error('[StreamHandler] Erro ao processar evento plan-ready:', err.message)
+      );
+    });
+
+    // Detecta plano resolvido externamente (via browser)
+    this.session.on('plan-resolved', () => {
+      this._handlePlanResolvedEvent().catch((err) =>
+        console.error('[StreamHandler] Erro ao processar evento plan-resolved:', err.message)
+      );
+    });
+
+    // Revisão resolvida via Discord — limpa estado antes que plan-resolved chegue
+    this.session.on('plan-review-resolved', () => this._clearPendingPlanReview());
 
     // Gerencia pedidos de permissão interativos com botões Aprovar/Recusar
     this.session.on('permission', (event) => {
@@ -443,34 +466,50 @@ export class StreamHandler {
       this._archiveTimer = null;
     }
     this._clearPendingPermission();
+    this._clearPendingPlanReview();
   }
 
   /**
-   * Gerencia eventos de permissão: exibe botões Aprovar/Recusar ou aviso inline.
-   * Para `status === 'requested'`, envia mensagem com botões e inicia timer de 60s.
+   * Gerencia eventos de permissão: exibe botões Permitir uma vez / Permitir sempre / Rejeitar.
+   * Para `status === 'requested'`, envia mensagem com 3 botões e inicia timer de auto-aprovação.
+   * Para `status === 'auto_approved'`, envia notificação discreta.
    * Para `status === 'unknown'`, envia aviso simples sem botões.
-   * @param {{ status: string, permissionId?: string, toolName?: string, description?: string, error?: string }} event
+   * @param {{ status: string, permissionId?: string, toolName?: string, description?: string, patterns?: string[], directory?: string|null, error?: string }} event
    */
-  async _handlePermissionEvent({ status, permissionId, toolName, description, error }) {
+  async _handlePermissionEvent({ status, permissionId, toolName, description, patterns, directory, error }) {
     if (status === 'requested') {
       // Cancela permissão pendente anterior se existir (pode ocorrer em rajadas)
-      this._clearPendingPermission();
+    this._clearPendingPermission();
 
       const toolLabel = toolName ?? 'ferramenta';
       const descLine = description ? `\n> ${description}` : '';
+
+      // Exibe padrões de diretório/arquivo se disponíveis
+      const patternList = Array.isArray(patterns) && patterns.length > 0 ? patterns : [];
+      const dirLine = directory && !patternList.includes(directory) ? [directory + '/*'] : [];
+      const allPatterns = [...patternList, ...dirLine];
+      const patternsLine = allPatterns.length > 0
+        ? `\n\n**Padrões:**\n${allPatterns.map(p => `- \`${p}\``).join('\n')}`
+        : '';
+
       const content =
-        `🔐 **Permissão solicitada** para \`${toolLabel}\`${descLine}\n\n` +
-        `Aprove ou recuse em até **60 segundos**. Sem resposta, será aprovada automaticamente.`;
+        `⚠️ **Permissão necessária** — \`${toolLabel}\`${descLine}${patternsLine}\n\n` +
+        `Responda em até **60 segundos**. Sem resposta, será aprovada automaticamente.`;
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId(`approve_permission_${this.session.sessionId}`)
-          .setLabel('Aprovar')
-          .setStyle(ButtonStyle.Success)
+          .setCustomId(`allow_once_${this.session.sessionId}`)
+          .setLabel('Permitir uma vez')
+          .setStyle(ButtonStyle.Primary)
           .setEmoji('✅'),
         new ButtonBuilder()
-          .setCustomId(`deny_permission_${this.session.sessionId}`)
-          .setLabel('Recusar')
+          .setCustomId(`allow_always_${this.session.sessionId}`)
+          .setLabel('Permitir sempre')
+          .setStyle(ButtonStyle.Success)
+          .setEmoji('🔓'),
+        new ButtonBuilder()
+          .setCustomId(`reject_permission_${this.session.sessionId}`)
+          .setLabel('Rejeitar')
           .setStyle(ButtonStyle.Danger)
           .setEmoji('❌'),
       );
@@ -497,18 +536,25 @@ export class StreamHandler {
         }
 
         this.session._pendingPermissionId = null;
+        this.session._pendingPermissionData = null;
 
-        // Desabilita botões antes de aprovar
+        // Desabilita todos os 3 botões antes de aprovar
         const disabledRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
-            .setCustomId(`approve_permission_${this.session.sessionId}`)
-            .setLabel('Aprovar')
-            .setStyle(ButtonStyle.Success)
+            .setCustomId(`allow_once_${this.session.sessionId}`)
+            .setLabel('Permitir uma vez')
+            .setStyle(ButtonStyle.Primary)
             .setEmoji('✅')
             .setDisabled(true),
           new ButtonBuilder()
-            .setCustomId(`deny_permission_${this.session.sessionId}`)
-            .setLabel('Recusar')
+            .setCustomId(`allow_always_${this.session.sessionId}`)
+            .setLabel('Permitir sempre')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('🔓')
+            .setDisabled(true),
+          new ButtonBuilder()
+            .setCustomId(`reject_permission_${this.session.sessionId}`)
+            .setLabel('Rejeitar')
             .setStyle(ButtonStyle.Danger)
             .setEmoji('❌')
             .setDisabled(true),
@@ -533,6 +579,14 @@ export class StreamHandler {
       }, PERMISSION_TIMEOUT_MS);
 
       this._pendingPermission = { permissionId, message: permMsg, timeout };
+    } else if (status === 'auto_approved') {
+      // Notificação discreta de auto-aprovação por padrão em cache
+      const toolLabel = toolName ?? 'ferramenta';
+      this.thread
+        .send(`🔓 *Auto-aprovado (padrão já liberado) — \`${toolLabel}\`*`)
+        .catch((sendErr) =>
+          console.error('[StreamHandler] Erro ao enviar notificação de auto-aprovação:', sendErr.message)
+        );
     } else if (status === 'unknown') {
       this.thread
         .send(`⚠️ **Permissão solicitada** (não foi possível identificar a ferramenta)${error ? `: ${error}` : ''}`)
@@ -540,7 +594,7 @@ export class StreamHandler {
           console.error('[StreamHandler] Erro ao enviar aviso de permissão:', sendErr.message)
         );
     }
-    // Outros status ('approving', 'approved', 'failed') não são emitidos no novo fluxo interativo
+    // Outros status não precisam de tratamento na UI
   }
 
   /**
@@ -550,6 +604,99 @@ export class StreamHandler {
     if (!this._pendingPermission) return;
     clearTimeout(this._pendingPermission.timeout);
     this._pendingPermission = null;
+  }
+
+  /**
+   * Gerencia eventos de revisão de plano: exibe botões Aprovar/Alterações/Rejeitar.
+   * Não possui auto-aprovação — revisão de plano sempre requer ação humana.
+   * @param {object} data - Dados do evento plan-ready (conteúdo do plano)
+   */
+  async _handlePlanReadyEvent(data) {
+    // Limpa review pendente anterior se existir
+    this._clearPendingPlanReview();
+
+    const content =
+      `📋 **Plano pronto para revisão**\n` +
+      `O plano completo está nas mensagens acima. Aprove aqui ou pelo navegador.\n\n` +
+      `> Ao aprovar, o agente \`build\` será iniciado automaticamente.`;
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`approve_plan_${this.session.sessionId}`)
+        .setLabel('Aprovar e Construir')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('✅'),
+      new ButtonBuilder()
+        .setCustomId(`changes_plan_${this.session.sessionId}`)
+        .setLabel('Solicitar Alterações')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('📝'),
+      new ButtonBuilder()
+        .setCustomId(`reject_plan_${this.session.sessionId}`)
+        .setLabel('Rejeitar')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('❌'),
+    );
+
+    let planMsg;
+    try {
+      planMsg = await this.thread.send({ content, components: [row] });
+    } catch (sendErr) {
+      console.error('[StreamHandler] Erro ao enviar mensagem de revisão de plano:', sendErr.message);
+      return;
+    }
+
+    this._pendingPlanReview = {
+      message: planMsg,
+      plannotatorBaseUrl: this.session.server?.plannotatorBaseUrl ?? null,
+    };
+  }
+
+  /**
+   * Trata a resolução de plano via browser: desabilita botões e informa usuário.
+   */
+  async _handlePlanResolvedEvent() {
+    if (!this._pendingPlanReview) return;
+
+    const pending = this._pendingPlanReview;
+    this._pendingPlanReview = null;
+
+    const disabledRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`approve_plan_${this.session.sessionId}`)
+        .setLabel('Aprovar e Construir')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('✅')
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`changes_plan_${this.session.sessionId}`)
+        .setLabel('Solicitar Alterações')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('📝')
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`reject_plan_${this.session.sessionId}`)
+        .setLabel('Rejeitar')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('❌')
+        .setDisabled(true),
+    );
+
+    try {
+      await pending.message.edit({
+        content: `📋 **Plano revisado via Plannotator** ✅\n*Decisão tomada no navegador.*`,
+        components: [disabledRow],
+      });
+    } catch (editErr) {
+      debug('StreamHandler', '⚠️ Erro ao editar mensagem de revisão após resolução: %s', editErr.message);
+    }
+  }
+
+  /**
+   * Cancela a revisão de plano pendente, limpando o estado.
+   */
+  _clearPendingPlanReview() {
+    this._pendingPlanReview = null;
   }
 }
 

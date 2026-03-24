@@ -606,25 +606,126 @@ describe('handleAutocomplete() — modelos', () => {
 });
 
 describe('handleInteraction() — approve/deny permission', () => {
-  it('approve_permission_ — chama confirmPermission e atualiza interação', async () => {
+  it('allow_once_ — chama approvePermission com apiSessionId e permissionId corretos', async () => {
     const sessionId = 'sess-approve-1';
-    const confirmPermission = vi.fn().mockResolvedValue({});
-    const session = { sessionId, apiSessionId: 'api-perm-1', server: { client: { confirmPermission } } };
-    const interaction = createComponentInteraction({ isButton: true, customId: `approve_permission_${sessionId}` });
+    const userId = 'user-approver-1';
+    const approvePermission = vi.fn().mockResolvedValue({});
+    const session = {
+      sessionId,
+      userId,
+      apiSessionId: 'api-perm-1',
+      agent: 'build',
+      _pendingPermissionId: 'perm-xyz',
+      _pendingPermissionData: null,
+      resolvePermission: vi.fn(),
+      server: { client: { approvePermission } },
+    };
+    const interaction = createComponentInteraction({ isButton: true, customId: `allow_once_${sessionId}`, userId });
     const sm = createSessionManager({ getByIdResult: session });
     await handleInteraction(interaction, sm);
-    expect(confirmPermission).toHaveBeenCalledWith('api-perm-1');
+    expect(approvePermission).toHaveBeenCalledWith('api-perm-1', 'perm-xyz');
     expect(interaction.update).toHaveBeenCalled();
   });
 
-  it('approve_permission_ — sem sessão responde com erro', async () => {
+  it('allow_once_ — sem sessão responde com erro', async () => {
+    const interaction = createComponentInteraction({ isButton: true, customId: 'allow_once_sess-nao-existe' });
+    const sm = createSessionManager({ getByIdResult: null });
+    await handleInteraction(interaction, sm);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('não encontrada') }));
+  });
+
+  it('allow_always_ — cacheia padrão e chama approvePermission', async () => {
+    const sessionId = 'sess-always-1';
+    const userId = 'user-always-1';
+    const approvePermission = vi.fn().mockResolvedValue({});
+    const addAllowedPattern = vi.fn();
+    const permData = { toolName: 'bash', patterns: ['C:/Users/*'], directory: null };
+    const session = {
+      sessionId,
+      userId,
+      apiSessionId: 'api-always-1',
+      agent: 'build',
+      _pendingPermissionId: 'perm-always-1',
+      _pendingPermissionData: permData,
+      addAllowedPattern,
+      resolvePermission: vi.fn(),
+      server: { client: { approvePermission } },
+    };
+    const interaction = createComponentInteraction({ isButton: true, customId: `allow_always_${sessionId}`, userId });
+    const sm = createSessionManager({ getByIdResult: session });
+    await handleInteraction(interaction, sm);
+    expect(addAllowedPattern).toHaveBeenCalledWith(permData);
+    expect(approvePermission).toHaveBeenCalledWith('api-always-1', 'perm-always-1');
+    expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('Sempre permitido'),
+    }));
+  });
+
+  it('allow_always_ — sem sessão responde com erro', async () => {
+    const interaction = createComponentInteraction({ isButton: true, customId: 'allow_always_sess-nao-existe' });
+    const sm = createSessionManager({ getByIdResult: null });
+    await handleInteraction(interaction, sm);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('não encontrada') }));
+  });
+
+  it('reject_permission_ — chama rejectPermission, NÃO chama abort', async () => {
+    const sessionId = 'sess-reject-1';
+    const userId = 'user-reject-1';
+    const rejectPermission = vi.fn().mockResolvedValue({});
+    const abort = vi.fn();
+    const session = {
+      sessionId,
+      userId,
+      apiSessionId: 'api-reject-1',
+      agent: 'build',
+      _pendingPermissionId: 'perm-reject-1',
+      _pendingPermissionData: { toolName: 'bash', patterns: [], directory: null },
+      abort,
+      resolvePermission: vi.fn(),
+      server: { client: { rejectPermission } },
+    };
+    const interaction = createComponentInteraction({ isButton: true, customId: `reject_permission_${sessionId}`, userId });
+    const sm = createSessionManager({ getByIdResult: session });
+    await handleInteraction(interaction, sm);
+    expect(rejectPermission).toHaveBeenCalledWith('api-reject-1', 'perm-reject-1');
+    expect(abort).not.toHaveBeenCalled();
+    expect(interaction.update).toHaveBeenCalledWith(expect.objectContaining({
+      content: expect.stringContaining('rejeitada'),
+    }));
+  });
+
+  it('reject_permission_ — sem sessão responde com erro', async () => {
+    const interaction = createComponentInteraction({ isButton: true, customId: 'reject_permission_sess-nao-existe' });
+    const sm = createSessionManager({ getByIdResult: null });
+    await handleInteraction(interaction, sm);
+    expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('não encontrada') }));
+  });
+
+  it('approve_permission_ (legado) — chama approvePermission com apiSessionId e permissionId', async () => {
+    const sessionId = 'sess-legacy-1';
+    const approvePermission = vi.fn().mockResolvedValue({});
+    const session = {
+      sessionId,
+      apiSessionId: 'api-legacy-1',
+      _pendingPermissionId: 'perm-legacy-1',
+      _pendingPermissionData: null,
+      server: { client: { approvePermission } },
+    };
+    const interaction = createComponentInteraction({ isButton: true, customId: `approve_permission_${sessionId}` });
+    const sm = createSessionManager({ getByIdResult: session });
+    await handleInteraction(interaction, sm);
+    expect(approvePermission).toHaveBeenCalledWith('api-legacy-1', 'perm-legacy-1');
+    expect(interaction.update).toHaveBeenCalled();
+  });
+
+  it('approve_permission_ (legado) — sem sessão responde com erro', async () => {
     const interaction = createComponentInteraction({ isButton: true, customId: 'approve_permission_sess-nao-existe' });
     const sm = createSessionManager({ getByIdResult: null });
     await handleInteraction(interaction, sm);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('não encontrada') }));
   });
 
-  it('deny_permission_ — chama abort e atualiza com mensagem de recusa', async () => {
+  it('deny_permission_ (legado) — chama abort e atualiza com mensagem de recusa', async () => {
     const sessionId = 'sess-deny-1';
     const abort = vi.fn().mockResolvedValue({});
     const session = { sessionId, apiSessionId: 'api-deny-1', server: { client: {} }, abort };

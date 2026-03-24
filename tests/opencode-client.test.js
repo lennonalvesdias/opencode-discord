@@ -188,6 +188,30 @@ describe('OpenCodeClient', () => {
     });
   });
 
+  // ─── rejectPermission ────────────────────────────────────────────────────────
+
+  describe('rejectPermission()', () => {
+    it('chama POST em /session/{id}/permissions/{permId} com action reject', async () => {
+      mockFetch.mockResolvedValue(mockResponse(null));
+      const client = new OpenCodeClient(BASE_URL);
+
+      await client.rejectPermission('sess-202', 'perm-abc');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${BASE_URL}/session/sess-202/permissions/perm-abc`,
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+
+    it('não lança erro em resposta 4xx (best-effort)', async () => {
+      mockFetch.mockResolvedValue(mockResponse('Forbidden', 403));
+      const client = new OpenCodeClient(BASE_URL);
+
+      // rejectPermission não deve lançar mesmo com status de erro
+      await expect(client.rejectPermission('sess-202', 'perm-abc')).resolves.toBeUndefined();
+    });
+  });
+
   // ─── _fetch ──────────────────────────────────────────────────────────────────
 
   describe('_fetch()', () => {

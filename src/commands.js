@@ -10,6 +10,9 @@ import {
   ButtonStyle,
   MessageFlags,
   AttachmentBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from 'discord.js';
 import { existsSync } from 'fs';
 import { readdir } from 'fs/promises';
@@ -25,6 +28,7 @@ import { audit } from './audit.js';
 import { getGitHubClient } from './github.js';
 import { analyzeOutput, captureThreadMessages, formatReportText, buildReportEmbed } from './reporter.js';
 import { getRepoInfo, hasChanges, createBranchAndCommit, pushBranch } from './git.js';
+import { PlannotatorClient } from './plannotator-client.js';
 
 const commandRateLimiter = new RateLimiter({ maxActions: 5, windowMs: 60_000 });
 
@@ -1503,7 +1507,32 @@ async function handleReport(interaction, sessionManager) {
  * @param {import('./session-manager.js').SessionManager} sessionManager
  */
 export async function handleInteraction(interaction, sessionManager) {
-  if (!interaction.isStringSelectMenu() && !interaction.isButton()) return;
+  if (!interaction.isStringSelectMenu() && !interaction.isButton() && !interaction.isModalSubmit()) return;
+
+  // ─── Modal de feedback de plano ───────────────────────────────────────────────
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('plan_feedback_modal_')) {
+    const sessionId = interaction.customId.replace('plan_feedback_modal_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    const feedback = interaction.fields.getTextInputValue('plan_feedback_input');
+    try {
+      await interaction.deferReply({ ephemeral: true });
+      if (session.server?.plannotatorBaseUrl) {
+        const plannotatorClient = new PlannotatorClient(session.server.plannotatorBaseUrl);
+        await plannotatorClient.deny({ feedback });
+      }
+      await interaction.editReply('📝 **Feedback enviado.** O agente irá revisar o plano.');
+      session.notifyPlanReviewResolved();
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao enviar feedback de plano:', err.message);
+      await interaction.editReply(`⚠️ Erro ao enviar feedback: ${err.message}`).catch(() => {});
+    }
+    return;
+  }
 
   // Select de projeto
   if (interaction.customId.startsWith('select_project_')) {
@@ -1624,6 +1653,142 @@ export async function handleInteraction(interaction, sessionManager) {
   // ─── Aprovação de Permissão ───────────────────────────────────────────────────
   const { customId } = interaction;
 
+  // Helper local para criar a action row desabilitada com 3 botões
+  function buildDisabledPermissionRow(sessionId, chosenLabel) {
+    return new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`allow_once_${sessionId}`)
+        .setLabel(chosenLabel === 'once' ? 'Permitido ✅' : 'Permitir uma vez')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('✅')
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`allow_always_${sessionId}`)
+        .setLabel(chosenLabel === 'always' ? 'Sempre permitido 🔓' : 'Permitir sempre')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('🔓')
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`reject_permission_${sessionId}`)
+        .setLabel(chosenLabel === 'reject' ? 'Rejeitado ❌' : 'Rejeitar')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('❌')
+        .setDisabled(true),
+    );
+  }
+
+  if (customId.startsWith('allow_once_')) {
+    const sessionId = customId.replace('allow_once_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    if (!ALLOW_SHARED_SESSIONS && session.userId !== interaction.user.id) {
+      return interaction.reply({
+        content: '🚫 Apenas o criador da sessão pode gerenciar permissões.',
+        ephemeral: true,
+      });
+    }
+    try {
+      const permId = session._pendingPermissionId;
+      if (!permId) {
+        await interaction.reply({ content: '⚠️ Nenhuma permissão pendente.', ephemeral: true });
+        return;
+      }
+      session.resolvePermission();
+      await session.server.client.approvePermission(session.apiSessionId, permId);
+      await interaction.update({
+        content: `✅ **Permitido uma vez** — \`${session.agent}\``,
+        components: [buildDisabledPermissionRow(sessionId, 'once')],
+      });
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao aprovar permissão uma vez:', err.message);
+      await interaction.reply({ content: '⚠️ Erro ao aprovar permissão.', ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
+
+  if (customId.startsWith('allow_always_')) {
+    const sessionId = customId.replace('allow_always_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    if (!ALLOW_SHARED_SESSIONS && session.userId !== interaction.user.id) {
+      return interaction.reply({
+        content: '🚫 Apenas o criador da sessão pode gerenciar permissões.',
+        ephemeral: true,
+      });
+    }
+    try {
+      const permId = session._pendingPermissionId;
+      const permData = session._pendingPermissionData;
+      if (!permId) {
+        await interaction.reply({ content: '⚠️ Nenhuma permissão pendente.', ephemeral: true });
+        return;
+      }
+      session.resolvePermission();
+      // Cacheia o padrão para auto-aprovar futuras solicitações iguais
+      if (permData) {
+        session.addAllowedPattern(permData);
+      }
+      await session.server.client.approvePermission(session.apiSessionId, permId);
+      const patternsText = permData?.patterns?.length > 0
+        ? `\nPadrões: ${permData.patterns.map(p => `\`${p}\``).join(', ')}`
+        : '';
+      await interaction.update({
+        content: `🔓 **Sempre permitido** — \`${permData?.toolName ?? 'ferramenta'}\`${patternsText}\n*Futuras solicitações com este padrão serão aprovadas automaticamente.*`,
+        components: [buildDisabledPermissionRow(sessionId, 'always')],
+      });
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao aprovar permissão sempre:', err.message);
+      await interaction.reply({ content: '⚠️ Erro ao aprovar permissão.', ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
+
+  if (customId.startsWith('reject_permission_')) {
+    const sessionId = customId.replace('reject_permission_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    if (!ALLOW_SHARED_SESSIONS && session.userId !== interaction.user.id) {
+      return interaction.reply({
+        content: '🚫 Apenas o criador da sessão pode gerenciar permissões.',
+        ephemeral: true,
+      });
+    }
+    try {
+      const permId = session._pendingPermissionId;
+      const permData = session._pendingPermissionData;
+      if (!permId) {
+        await interaction.reply({ content: '⚠️ Nenhuma permissão pendente.', ephemeral: true });
+        return;
+      }
+      session.resolvePermission();
+      // Tenta rejeitar via API (best-effort — sessão não é abortada)
+      if (session.server?.client?.rejectPermission) {
+        await session.server.client.rejectPermission(session.apiSessionId, permId).catch((err) => {
+          console.error('[commands] ⚠️ rejectPermission falhou (continuando):', err.message);
+        });
+      }
+      await interaction.update({
+        content: `❌ **Permissão rejeitada** — \`${permData?.toolName ?? 'ferramenta'}\`\n*O agente tentará uma abordagem alternativa.*`,
+        components: [buildDisabledPermissionRow(sessionId, 'reject')],
+      });
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao rejeitar permissão:', err.message);
+      await interaction.reply({ content: '⚠️ Erro ao rejeitar permissão.', ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
+
+  // ─── Handlers legados (compatibilidade com mensagens antigas) ─────────────────
+
   if (customId.startsWith('approve_permission_')) {
     const sessionId = customId.replace('approve_permission_', '');
     const session = sessionManager.getById(sessionId);
@@ -1632,22 +1797,17 @@ export async function handleInteraction(interaction, sessionManager) {
       return;
     }
     try {
-      await session.server.client.confirmPermission(session.apiSessionId);
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`approve_permission_${sessionId}`)
-          .setLabel('Aprovado ✅')
-          .setStyle(ButtonStyle.Success)
-          .setDisabled(true),
-        new ButtonBuilder()
-          .setCustomId(`deny_permission_${sessionId}`)
-          .setLabel('Recusar ❌')
-          .setStyle(ButtonStyle.Danger)
-          .setDisabled(true)
-      );
-      await interaction.update({ components: [row] });
+      const permId = session._pendingPermissionId;
+      if (!permId) {
+        await interaction.reply({ content: '⚠️ Nenhuma permissão pendente.', ephemeral: true });
+        return;
+      }
+      session._pendingPermissionId = null;
+      session._pendingPermissionData = null;
+      await session.server.client.approvePermission(session.apiSessionId, permId);
+      await interaction.update({ content: '✅ Permissão aprovada.' });
     } catch (err) {
-      console.error('[commands] ❌ Erro ao aprovar permissão:', err.message);
+      console.error('[commands] ❌ Erro ao aprovar permissão (legado):', err.message);
       await interaction.reply({ content: '⚠️ Erro ao aprovar permissão.', ephemeral: true }).catch(() => {});
     }
     return;
@@ -1662,22 +1822,135 @@ export async function handleInteraction(interaction, sessionManager) {
     }
     try {
       await session.abort();
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`approve_permission_${sessionId}`)
-          .setLabel('Aprovado ✅')
-          .setStyle(ButtonStyle.Success)
-          .setDisabled(true),
-        new ButtonBuilder()
-          .setCustomId(`deny_permission_${sessionId}`)
-          .setLabel('Recusado ❌')
-          .setStyle(ButtonStyle.Danger)
-          .setDisabled(true)
-      );
-      await interaction.update({ components: [row], content: '❌ Permissão recusada — sessão encerrada.' });
+      await interaction.update({ content: '❌ Permissão recusada — sessão encerrada.' });
     } catch (err) {
-      console.error('[commands] ❌ Erro ao recusar permissão:', err.message);
+      console.error('[commands] ❌ Erro ao recusar permissão (legado):', err.message);
       await interaction.reply({ content: '⚠️ Erro ao recusar permissão.', ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
+
+  // ─── Revisão de Plano ─────────────────────────────────────────────────────────
+
+  // Helper para criar row de plano desabilitada
+  function buildDisabledPlanRow(sessionId, chosenLabel) {
+    return new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`approve_plan_${sessionId}`)
+        .setLabel(chosenLabel === 'approve' ? 'Aprovado ✅' : 'Aprovar e Construir')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('✅')
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`changes_plan_${sessionId}`)
+        .setLabel(chosenLabel === 'changes' ? 'Alterações solicitadas 📝' : 'Solicitar Alterações')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('📝')
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`reject_plan_${sessionId}`)
+        .setLabel(chosenLabel === 'reject' ? 'Rejeitado ❌' : 'Rejeitar')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('❌')
+        .setDisabled(true),
+    );
+  }
+
+  if (customId.startsWith('approve_plan_')) {
+    const sessionId = customId.replace('approve_plan_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    if (!ALLOW_SHARED_SESSIONS && session.userId !== interaction.user.id) {
+      return interaction.reply({
+        content: '🚫 Apenas o criador da sessão pode revisar o plano.',
+        ephemeral: true,
+      });
+    }
+    try {
+      await interaction.deferUpdate();
+      if (session.server?.plannotatorBaseUrl) {
+        const plannotatorClient = new PlannotatorClient(session.server.plannotatorBaseUrl);
+        await plannotatorClient.approve({ agentSwitch: 'build' });
+      }
+      await interaction.editReply({
+        content: `✅ **Plano aprovado** por ${interaction.user}\n> Agente \`build\` iniciado automaticamente.`,
+        components: [buildDisabledPlanRow(sessionId, 'approve')],
+      });
+      session.notifyPlanReviewResolved();
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao aprovar plano:', err.message);
+      // Plannotator pode já ter sido resolvido (race condition com browser)
+      await interaction.editReply({
+        content: `✅ **Plano revisado** — decisão já processada.`,
+        components: [buildDisabledPlanRow(sessionId, 'approve')],
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  if (customId.startsWith('changes_plan_')) {
+    const sessionId = customId.replace('changes_plan_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    if (!ALLOW_SHARED_SESSIONS && session.userId !== interaction.user.id) {
+      return interaction.reply({
+        content: '🚫 Apenas o criador da sessão pode revisar o plano.',
+        ephemeral: true,
+      });
+    }
+    // Abre modal para o usuário digitar o feedback
+    const modal = new ModalBuilder()
+      .setCustomId(`plan_feedback_modal_${sessionId}`)
+      .setTitle('Solicitar Alterações no Plano');
+    const feedbackInput = new TextInputBuilder()
+      .setCustomId('plan_feedback_input')
+      .setLabel('Descreva as alterações desejadas')
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('Ex: Adicione uma fase de testes antes da implementação...')
+      .setRequired(true)
+      .setMaxLength(4000);
+    const row = new ActionRowBuilder().addComponents(feedbackInput);
+    modal.addComponents(row);
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (customId.startsWith('reject_plan_')) {
+    const sessionId = customId.replace('reject_plan_', '');
+    const session = sessionManager.getById(sessionId);
+    if (!session) {
+      await interaction.reply({ content: '❌ Sessão não encontrada.', ephemeral: true });
+      return;
+    }
+    if (!ALLOW_SHARED_SESSIONS && session.userId !== interaction.user.id) {
+      return interaction.reply({
+        content: '🚫 Apenas o criador da sessão pode revisar o plano.',
+        ephemeral: true,
+      });
+    }
+    try {
+      await interaction.deferUpdate();
+      if (session.server?.plannotatorBaseUrl) {
+        const plannotatorClient = new PlannotatorClient(session.server.plannotatorBaseUrl);
+        await plannotatorClient.deny({ feedback: 'Plano rejeitado pelo usuário via Discord.' });
+      }
+      await interaction.editReply({
+        content: `❌ **Plano rejeitado** por ${interaction.user}`,
+        components: [buildDisabledPlanRow(sessionId, 'reject')],
+      });
+      session.notifyPlanReviewResolved();
+    } catch (err) {
+      console.error('[commands] ❌ Erro ao rejeitar plano:', err.message);
+      await interaction.editReply({
+        content: `❌ **Plano rejeitado** — ${err.message}`,
+        components: [buildDisabledPlanRow(sessionId, 'reject')],
+      }).catch(() => {});
     }
     return;
   }

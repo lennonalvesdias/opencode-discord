@@ -289,6 +289,73 @@ describe('OpenCodeSession', () => {
     expect(permissions.length).toBeGreaterThan(0)
   })
 
+  it('handleSSEEvent permission.asked emite permission com patterns', async () => {
+    const permissions = []
+    session.on('permission', (p) => permissions.push(p))
+    session.handleSSEEvent({
+      type: 'permission.asked',
+      data: {
+        properties: {
+          id: 'perm-1',
+          toolName: 'bash',
+          description: 'acessar diretório',
+          patterns: ['C:/Users/test/*'],
+          directory: null,
+        }
+      }
+    })
+    expect(permissions[0]).toMatchObject({
+      status: 'requested',
+      permissionId: 'perm-1',
+      toolName: 'bash',
+      patterns: ['C:/Users/test/*'],
+    })
+  })
+
+  it('isPatternAllowed retorna false para padrão não cacheado', () => {
+    expect(session.isPatternAllowed({ toolName: 'bash', patterns: ['C:/Users/*'], directory: null })).toBe(false)
+  })
+
+  it('addAllowedPattern + isPatternAllowed retorna true', () => {
+    const permData = { toolName: 'bash', patterns: ['C:/Users/*'], directory: null }
+    session.addAllowedPattern(permData)
+    expect(session.isPatternAllowed(permData)).toBe(true)
+  })
+
+  it('padrões diferentes não fazem match cruzado', () => {
+    session.addAllowedPattern({ toolName: 'bash', patterns: ['C:/Users/*'], directory: null })
+    expect(session.isPatternAllowed({ toolName: 'bash', patterns: ['C:/Temp/*'], directory: null })).toBe(false)
+  })
+
+  it('handleSSEEvent permission.asked auto-aprova padrão em cache', async () => {
+    const permData = { toolName: 'bash', patterns: ['C:/Users/*'], directory: null }
+    session.addAllowedPattern(permData)
+
+    const mockApprove = vi.fn().mockResolvedValue()
+    session.server = { client: { approvePermission: mockApprove } }
+    session.apiSessionId = 'api-sess-1'
+
+    const permissions = []
+    session.on('permission', (p) => permissions.push(p))
+
+    session.handleSSEEvent({
+      type: 'permission.asked',
+      data: {
+        properties: {
+          id: 'perm-cache-1',
+          toolName: 'bash',
+          patterns: ['C:/Users/*'],
+        }
+      }
+    })
+
+    // Avança timers para que a promise interna de approvePermission seja resolvida
+    await vi.runAllTimersAsync()
+
+    expect(permissions[0].status).toBe('auto_approved')
+    expect(mockApprove).toHaveBeenCalledWith('api-sess-1', 'perm-cache-1')
+  })
+
   it('flushPending() retorna output acumulado e limpa', async () => {
     await session.start(serverManager)
     session.status = 'running'
@@ -565,6 +632,37 @@ describe('OpenCodeSession', () => {
     await session.close()
     expect(firedClose).toBe(true)
     expect(session.status).toBe('finished')
+  })
+
+  // ─── resolvePermission ────────────────────────────────────────────────────────
+
+  it('resolvePermission() limpa _pendingPermissionId', () => {
+    session._pendingPermissionId = 'perm-123'
+    session._pendingPermissionData = { toolName: 'bash', patterns: [], directory: null }
+    session.resolvePermission()
+    expect(session._pendingPermissionId).toBeNull()
+  })
+
+  it('resolvePermission() limpa _pendingPermissionData', () => {
+    session._pendingPermissionId = 'perm-456'
+    session._pendingPermissionData = { toolName: 'write_file', patterns: ['*.js'], directory: '/src' }
+    session.resolvePermission()
+    expect(session._pendingPermissionData).toBeNull()
+  })
+
+  it('resolvePermission() emite evento permission-resolved', () => {
+    session._pendingPermissionId = 'perm-789'
+    session._pendingPermissionData = { toolName: 'read_file', patterns: [], directory: null }
+    let fired = false
+    session.on('permission-resolved', () => { fired = true })
+    session.resolvePermission()
+    expect(fired).toBe(true)
+  })
+
+  it('resolvePermission() funciona sem permissão pendente (idempotente)', () => {
+    expect(session._pendingPermissionId).toBeNull()
+    expect(() => session.resolvePermission()).not.toThrow()
+    expect(session._pendingPermissionId).toBeNull()
   })
 })
 

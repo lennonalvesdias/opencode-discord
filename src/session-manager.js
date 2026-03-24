@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto';
 import { basename } from 'path';
 import { stripAnsi, debug } from './utils.js';
 import { ServerManager } from './server-manager.js';
+import { PlanReviewDetector } from './plan-detector.js';
 import { SESSION_TIMEOUT_MS, MAX_BUFFER } from './config.js';
 import { saveSession, removeSession } from './persistence.js';
 
@@ -89,6 +90,12 @@ class OpenCodeSession extends EventEmitter {
     this.passthroughEnabled = true;
     /** ID da permissão aguardando aprovação interativa do usuário (null = nenhuma pendente) */
     this._pendingPermissionId = null;
+    /** Dados completos da permissão aguardando resposta (null = nenhuma pendente) */
+    this._pendingPermissionData = null;
+    /** @type {Set<string>} Padrões de permissão liberados com "Permitir sempre" nesta sessão */
+    this._allowedPatterns = new Set();
+    /** @type {PlanReviewDetector|null} Detector de plano aguardando revisão (apenas para agent=plan) */
+    this._planDetector = null;
   }
 
   /**
@@ -107,6 +114,17 @@ class OpenCodeSession extends EventEmitter {
     this.apiSessionId = apiSession.id;
 
     this.server.registerSession(this.apiSessionId, this);
+
+    // Inicia detecção de revisão de plano para sessões do agente plan
+    if (this.agent === 'plan' && this.server.plannotatorBaseUrl) {
+      this._planDetector = new PlanReviewDetector({
+        plannotatorBaseUrl: this.server.plannotatorBaseUrl,
+        sessionId: this.sessionId,
+      });
+      this._planDetector.on('plan-ready', (data) => this.emit('plan-ready', data));
+      this._planDetector.on('plan-resolved', () => this.emit('plan-resolved'));
+      this._planDetector.start();
+    }
 
     debug('OpenCodeSession', '✅ Sessão API criada: %s (sessão interna: %s)', this.apiSessionId, this.sessionId);
 
@@ -256,6 +274,13 @@ class OpenCodeSession extends EventEmitter {
     }
     this._pendingTimeouts = [];
     this._pendingPermissionId = null;
+    this._pendingPermissionData = null;
+
+    // Para o detector de plano se estiver ativo
+    if (this._planDetector) {
+      this._planDetector.stop();
+      this._planDetector = null;
+    }
 
     if (this.apiSessionId && this.server) {
       try {
@@ -355,7 +380,19 @@ class OpenCodeSession extends EventEmitter {
           props.title ??
           null;
 
-        debug('OpenCodeSession', '🔐 Permissão solicitada — id=%s tool=%s props=%O', permissionId, toolName, props);
+        // Extrai padrões de diretório/arquivo se disponíveis
+        const patterns =
+          props.patterns ??
+          props.permission?.patterns ??
+          (props.pattern ? [props.pattern] : []);
+
+        const directory =
+          props.directory ??
+          props.path ??
+          props.permission?.directory ??
+          null;
+
+        debug('OpenCodeSession', '🔐 Permissão solicitada — id=%s tool=%s patterns=%O props=%O', permissionId, toolName, patterns, props);
 
         if (!permissionId) {
           console.error('[OpenCodeSession] ⚠️  Evento permission.asked sem ID. Evento completo:', JSON.stringify(event, null, 2));
@@ -363,9 +400,22 @@ class OpenCodeSession extends EventEmitter {
           break;
         }
 
-        // Armazena ID da permissão e notifica o Discord para exibir botões interativos
+        const permData = { permissionId, toolName, description, patterns, directory };
+
+        // Verifica se o padrão já foi liberado com "Permitir sempre"
+        if (this.isPatternAllowed(permData)) {
+          debug('OpenCodeSession', '🔓 Padrão em cache — auto-aprovando permissão %s', permissionId);
+          this.server.client.approvePermission(this.apiSessionId, permissionId).catch((err) => {
+            console.error('[OpenCodeSession] ⚠️ Erro ao auto-aprovar permissão em cache:', err.message);
+          });
+          this.emit('permission', { ...permData, status: 'auto_approved' });
+          break;
+        }
+
+        // Armazena dados da permissão e notifica o Discord para exibir botões interativos
         this._pendingPermissionId = permissionId;
-        this.emit('permission', { status: 'requested', permissionId, toolName, description });
+        this._pendingPermissionData = permData;
+        this.emit('permission', { ...permData, status: 'requested' });
         break;
       }
 
@@ -434,6 +484,11 @@ class OpenCodeSession extends EventEmitter {
       this._drainMessageQueue().catch((err) => {
         console.error('[OpenCodeSession] ⚠️ Erro ao drenar fila de mensagens:', err.message);
       });
+      // Reseta o detector de plano para um novo ciclo (caso o agente tenha produzido novo plano)
+      if (this._planDetector) {
+        this._planDetector.reset();
+        this._planDetector.start(); // reinicia polling caso tenha parado após resolução anterior
+      }
     } else if (this.status === 'waiting_input') {
       // Servidor sinalizou idle novamente — sessão realmente concluída
       this.status = 'idle';
@@ -454,6 +509,60 @@ class OpenCodeSession extends EventEmitter {
     this.pendingOutput = '';
     if (out) this.lastActivityAt = new Date();
     return out;
+  }
+
+  /**
+   * Gera uma chave de cache para o padrão de permissão.
+   * @param {string} toolName
+   * @param {string[]} patterns
+   * @param {string|null} directory
+   * @returns {string}
+   * @private
+   */
+  _buildPatternKey(toolName, patterns, directory) {
+    const patternStr = Array.isArray(patterns) && patterns.length > 0
+      ? patterns.map(p => String(p)).sort().join('|')
+      : '';
+    return `${toolName}:${directory ?? ''}:${patternStr}`;
+  }
+
+  /**
+   * Verifica se este padrão de permissão já foi liberado com "Permitir sempre".
+   * @param {{ toolName: string, patterns: string[], directory: string|null }} permData
+   * @returns {boolean}
+   */
+  isPatternAllowed(permData) {
+    const key = this._buildPatternKey(permData.toolName, permData.patterns, permData.directory);
+    return this._allowedPatterns.has(key);
+  }
+
+  /**
+   * Adiciona um padrão ao cache de "sempre permitir" para esta sessão.
+   * @param {{ toolName: string, patterns: string[], directory: string|null }} permData
+   */
+  addAllowedPattern(permData) {
+    const key = this._buildPatternKey(permData.toolName, permData.patterns, permData.directory);
+    this._allowedPatterns.add(key);
+    debug('OpenCodeSession', '🔓 Padrão adicionado ao cache "sempre permitir": %s', key);
+  }
+
+  /**
+   * Sinaliza que a permissão pendente foi resolvida (aprovada, sempre permitida ou rejeitada).
+   * Emite 'permission-resolved' para que o StreamHandler cancele o timer de auto-aprovação.
+   */
+  resolvePermission() {
+    this._pendingPermissionId = null;
+    this._pendingPermissionData = null;
+    this.emit('permission-resolved');
+  }
+
+  /**
+   * Notifica o stream handler que a revisão de plano foi resolvida via Discord.
+   * Impede que o evento `plan-resolved` (disparado quando o plannotator fecha)
+   * sobrescreva a mensagem já atualizada pelo handler do botão.
+   */
+  notifyPlanReviewResolved() {
+    this.emit('plan-review-resolved');
   }
 
   /**

@@ -40,6 +40,14 @@ export const DEFAULT_TIMEOUT_MS = parseInt(process.env.OPENCODE_TIMEOUT_MS || '1
 /** Modelo de IA padrão (vazio = usa o padrão configurado no opencode) */
 export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || '';
 
+// ─── Plannotator ─────────────────────────────────────────────────────────────
+
+/** Porta base do plannotator (uma por servidor opencode). Default: OPENCODE_BASE_PORT + 1000 */
+export const PLANNOTATOR_BASE_PORT = parseInt(process.env.PLANNOTATOR_BASE_PORT || String(OPENCODE_BASE_PORT + 1000), 10);
+
+/** Intervalo de polling para detectar plano pronto no plannotator (ms) */
+export const PLAN_POLL_INTERVAL_MS = parseInt(process.env.PLAN_POLL_INTERVAL_MS || '3000', 10);
+
 // ─── Sessões ──────────────────────────────────────────────────────────────────
 
 /** Máximo de sessões ativas por usuário */

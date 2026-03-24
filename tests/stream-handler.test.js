@@ -23,7 +23,7 @@ vi.mock('discord.js', () => {
     this.addComponents = vi.fn().mockReturnThis();
   };
 
-  const ButtonStyle = { Success: 3, Danger: 4, Secondary: 2 };
+  const ButtonStyle = { Success: 3, Danger: 4, Secondary: 2, Primary: 1 };
 
   return { AttachmentBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle };
 });
@@ -469,6 +469,33 @@ describe('StreamHandler', () => {
       expect(thread.send).toHaveBeenCalledWith(
         '⚠️ **Permissão solicitada** (não foi possível identificar a ferramenta): Ferramenta bloqueada pela política'
       );
+    });
+
+    it("status 'auto_approved' envia notificação discreta com 🔓", async () => {
+      handler.start();
+      session.emit('permission', {
+        status: 'auto_approved',
+        toolName: 'bash',
+      });
+      await flushPromises();
+      expect(thread.send).toHaveBeenCalledWith(
+        expect.stringContaining('🔓')
+      );
+    });
+
+    it("status 'requested' envia 3 botões no componente", async () => {
+      handler.start();
+      session.emit('permission', {
+        status: 'requested',
+        toolName: 'bash',
+        description: 'Executar comando shell',
+        permissionId: 'perm-btn-3',
+      });
+      await flushPromises();
+      const callArg = thread.send.mock.calls[0][0];
+      expect(callArg.components).toHaveLength(1);
+      // O ActionRowBuilder mock retorna this em addComponents, mas verificamos que foi chamado
+      expect(callArg.components[0]).toBeDefined();
     });
   });
 

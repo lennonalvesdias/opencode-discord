@@ -97,6 +97,23 @@ export class OpenCodeClient {
     }
   }
 
+  /**
+   * Rejeita uma permissão pendente em uma sessão.
+   * Envia POST com { action: 'reject' } — comportamento depende da API.
+   * @param {string} apiSessionId - ID da sessão na API
+   * @param {string} permissionId - ID da permissão a rejeitar
+   * @returns {Promise<void>}
+   */
+  async rejectPermission(apiSessionId, permissionId) {
+    const path = `/session/${apiSessionId}/permissions/${permissionId}`;
+    const response = await this._fetch(path, { method: 'POST', body: JSON.stringify({ action: 'reject' }) });
+    // Aceita qualquer resposta 2xx ou ignora 4xx/5xx graciosamente
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      debug('OpenCodeClient', '⚠️ rejectPermission retornou %d: %s', response.status, body);
+    }
+  }
+
   // ─── SSE ────────────────────────────────────────────────────────────────────
 
   /**

@@ -12,6 +12,7 @@ import { debug } from './utils.js';
 import {
   OPENCODE_BIN,
   OPENCODE_BASE_PORT,
+  PLANNOTATOR_BASE_PORT,
   SERVER_RESTART_DELAY_MS,
   LOG_FILE_READ_DELAY_MS,
   SERVER_CIRCUIT_BREAKER_COOLDOWN_MS,
@@ -73,8 +74,9 @@ class OpenCodeServer extends EventEmitter {
    * @param {string} projectPath - Caminho absoluto do projeto
    * @param {number} port - Porta TCP alocada para este servidor
    * @param {(() => Promise<number>) | null} [portAllocator] - Callback assíncrono para obter nova porta em retentativas
+   * @param {number} plannotatorPort - Porta dedicada para o servidor plannotator
    */
-  constructor(projectPath, port, portAllocator) {
+  constructor(projectPath, port, portAllocator, plannotatorPort) {
     super();
     this.projectPath = projectPath;
     this.port = port;
@@ -85,6 +87,7 @@ class OpenCodeServer extends EventEmitter {
     this.sseAbortController = null;
     this.restartCount = 0;
     this._portAllocator = portAllocator ?? null;
+    this.plannotatorPort = plannotatorPort;
     this._circuitBreakerUntil = 0;
 
     /** @type {Map<string, object>} Map<apiSessionId, OpenCodeSession> */
@@ -136,6 +139,7 @@ class OpenCodeServer extends EventEmitter {
           ...sanitizeEnvForChild(),
           OPENCODE_DISABLE_AUTOUPDATE: 'true',
           OPENCODE_DISABLE_TERMINAL_TITLE: 'true',
+          PLANNOTATOR_PORT: String(this.plannotatorPort),
         },
       }
     );
@@ -385,6 +389,11 @@ class OpenCodeServer extends EventEmitter {
       circuitBreakerUntil: this._circuitBreakerUntil ?? 0,
     };
   }
+
+  /** URL base do servidor plannotator para esta sessão */
+  get plannotatorBaseUrl() {
+    return `http://localhost:${this.plannotatorPort}`;
+  }
 }
 
 // ─── ServerManager ────────────────────────────────────────────────────────────
@@ -405,6 +414,14 @@ class ServerManager {
 
     /** @type {Promise<number> | null} Mutex para serializar chamadas concorrentes a _allocatePort */
     this._allocating = null;
+
+    /** @type {Set<number>} */
+    this._usedPlannotatorPorts = new Set();
+
+    this._nextPlannotatorPort = PLANNOTATOR_BASE_PORT;
+
+    /** @type {Promise<number> | null} Mutex para serializar chamadas concorrentes a _allocatePlannotatorPort */
+    this._allocatingPlannotator = null;
 
     this._binValidated = false;
   }
@@ -465,6 +482,46 @@ class ServerManager {
   }
 
   /**
+   * Aloca a próxima porta disponível para o plannotator.
+   * Serializa chamadas concorrentes para evitar alocação de portas duplicadas.
+   * @returns {Promise<number>}
+   * @private
+   */
+  async _allocatePlannotatorPort() {
+    // Serializa chamadas concorrentes para evitar condição de corrida
+    if (this._allocatingPlannotator) {
+      await this._allocatingPlannotator;
+      return this._allocatePlannotatorPort();
+    }
+    this._allocatingPlannotator = this._doAllocatePlannotatorPort();
+    try {
+      return await this._allocatingPlannotator;
+    } finally {
+      this._allocatingPlannotator = null;
+    }
+  }
+
+  /**
+   * Implementação interna da alocação de porta para o plannotator.
+   * @returns {Promise<number>}
+   * @private
+   */
+  async _doAllocatePlannotatorPort() {
+    let port = this._nextPlannotatorPort;
+    let attempts = 0;
+    while (this._usedPlannotatorPorts.has(port) || !(await isPortAvailable(port))) {
+      port++;
+      attempts++;
+      if (attempts >= PORT_SCAN_MAX_RANGE) {
+        throw new Error('[ServerManager] ❌ Não foi possível alocar porta plannotator no intervalo disponível');
+      }
+    }
+    this._usedPlannotatorPorts.add(port);
+    this._nextPlannotatorPort = port + 1;
+    return port;
+  }
+
+  /**
    * Retorna o servidor existente para o projeto ou cria e inicia um novo.
    * @param {string} projectPath - Caminho absoluto do projeto
    * @returns {Promise<OpenCodeServer>}
@@ -488,13 +545,15 @@ class ServerManager {
       // status === 'error' (cooldown expirado) ou 'stopped' — cria novo servidor abaixo
     }
 
-    // Libera a porta do servidor anterior para reutilização
+    // Libera as portas do servidor anterior para reutilização
     if (existing) {
       this._usedPorts.delete(existing.port);
+      this._usedPlannotatorPorts.delete(existing.plannotatorPort);
     }
 
     const port = await this._allocatePort();
-    const server = new OpenCodeServer(projectPath, port, () => this._allocatePort());
+    const plannotatorPort = await this._allocatePlannotatorPort();
+    const server = new OpenCodeServer(projectPath, port, () => this._allocatePort(), plannotatorPort);
 
     server.on('restart', ({ restartCount }) => {
       console.warn(
@@ -526,6 +585,7 @@ class ServerManager {
     }
     this._servers.clear();
     this._usedPorts.clear();
+    this._usedPlannotatorPorts.clear();
     console.log('[ServerManager] 🔴 Todos os servidores parados');
   }
 
