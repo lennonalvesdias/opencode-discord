@@ -193,6 +193,24 @@ describe('analyzeOutput()', () => {
     expect(result.errors.some((e) => e.id === 'timeout')).toBe(true);
   });
 
+  it('retorna estrutura vazia para output null', () => {
+    const result = analyzeOutput(null);
+    expect(result).toEqual({
+      errors: [],
+      suggestedActions: [],
+      summary: 'Nenhum problema detectado automaticamente.',
+    });
+  });
+
+  it('retorna estrutura vazia para output undefined', () => {
+    const result = analyzeOutput(undefined);
+    expect(result).toEqual({
+      errors: [],
+      suggestedActions: [],
+      summary: 'Nenhum problema detectado automaticamente.',
+    });
+  });
+
   it('detecta api_error no output', () => {
     const output = 'Request failed: HTTP 500 Internal Server Error';
     const result = analyzeOutput(output, 'error');

@@ -121,10 +121,9 @@ export function analyzeOutput(output, status) {
   }
 
   for (const pattern of ERROR_PATTERNS) {
-    // Resetar lastIndex antes de cada uso — regex global/multiline é stateful
-    pattern.regex.lastIndex = 0;
-    let match;
-    while ((match = pattern.regex.exec(output)) !== null) {
+    // Criar instância fresca a cada chamada — regex com flag 'g' é stateful (lastIndex)
+    const freshRegex = new RegExp(pattern.regex.source, pattern.regex.flags);
+    for (const match of output.matchAll(freshRegex)) {
       const matchText = (match[1] || match[0]).trim();
       // Dedup por padrão + texto para evitar duplicatas dentro do mesmo padrão
       const dedupKey = `${pattern.id}:${matchText}`;
@@ -155,11 +154,11 @@ export function analyzeOutput(output, status) {
 /**
  * Captura mensagens de uma thread Discord (até `limit` mensagens).
  * @param {import('discord.js').ThreadChannel} channel
- * @param {number} limit
+ * @param {number} limit - Máximo de mensagens a capturar (limitado a 100 pela API do Discord)
  * @returns {Promise<Array<{author: string, content: string, timestamp: Date, isBot: boolean}>>}
  */
 export async function captureThreadMessages(channel, limit = 100) {
-  const fetched = await channel.messages.fetch({ limit });
+  const fetched = await channel.messages.fetch({ limit: Math.min(limit, 100) });
   const msgs = [...fetched.values()];
   return msgs
     .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
@@ -262,7 +261,7 @@ export function formatReportText(data) {
   }
 
   lines.push(hr);
-  lines.push(`Gerado pelo RemoteFlow em ${new Date().toISOString()}`);
+  lines.push(`Gerado pelo RemoteFlow em ${timestamp.toISOString()}`);
   lines.push(hr);
 
   return lines.join('\n');

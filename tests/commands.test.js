@@ -133,6 +133,8 @@ import * as fsp from 'fs/promises';
 import { existsSync } from 'fs';
 import { validateProjectPath } from '../src/config.js';
 import { handleCommand, handleAutocomplete, handleInteraction, commandDefinitions, getRateLimitStats, _resetProjectsCache } from '../src/commands.js';
+import { captureThreadMessages, buildReportEmbed } from '../src/reporter.js';
+import { getGitHubClient } from '../src/github.js';
 
 // ─── Factories de mocks ───────────────────────────────────────────────────────
 
@@ -330,7 +332,7 @@ describe('commandDefinitions', () => {
     }
   });
 
-  it('contém os comandos: plan, build, sessoes, status, parar, projetos, historico, comando', () => {
+  it('contém os comandos: plan, build, sessions, status, stop, projects, history, command, report', () => {
     const names = commandDefinitions.map((c) => c.name);
     expect(names).toContain('plan');
     expect(names).toContain('build');
@@ -340,6 +342,7 @@ describe('commandDefinitions', () => {
     expect(names).toContain('projects');
     expect(names).toContain('history');
     expect(names).toContain('command');
+    expect(names).toContain('report');
   });
 });
 
@@ -1181,6 +1184,158 @@ describe('handleInteraction() — select_project_plan', () => {
 
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining('inválido') }),
+    );
+  });
+});
+
+// ─── handleCommand — /report ──────────────────────────────────────────────────
+
+describe('handleCommand() — /report', () => {
+  beforeEach(() => {
+    mockConfigState.allowedUsers = [];
+    mockConfigState.maxGlobalSessions = 0;
+    _resetProjectsCache();
+    // Limpa histórico de chamadas sem apagar implementações dos mocks
+    vi.clearAllMocks();
+    // Restaurar implementações essenciais após clearAllMocks
+    captureThreadMessages.mockResolvedValue([]);
+    buildReportEmbed.mockReturnValue({
+      data: { color: 0xFFCC00, title: 'Relatório', fields: [] },
+      addFields: vi.fn().mockReturnThis(),
+    });
+  });
+
+  it('/report — fora de uma thread → reply com erro sobre uso em thread', async () => {
+    const sm = createSessionManager();
+    const interaction = createInteraction({
+      commandName: 'report',
+      options: { description: 'Comportamento inesperado detectado', severity: 'medium' },
+    });
+    // isThread retorna false por padrão no createInteraction
+
+    await handleCommand(interaction, sm);
+
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('thread') }),
+    );
+    expect(interaction.deferReply).not.toHaveBeenCalled();
+  });
+
+  it('/report — sem sessão ativa → defere, gera relatório e edita reply com embed e arquivo', async () => {
+    const sm = createSessionManager({ getByThreadResult: null });
+    const interaction = createInteraction({
+      commandName: 'report',
+      options: { description: 'Problema reportado sem sessão ativa', severity: 'low' },
+    });
+    interaction.channel.isThread.mockReturnValue(true);
+
+    await handleCommand(interaction, sm);
+
+    expect(interaction.deferReply).toHaveBeenCalledOnce();
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        embeds: expect.any(Array),
+        files: expect.any(Array),
+      }),
+    );
+  });
+
+  it('/report — caminho feliz com sessão ativa → defere, captura mensagens e edita reply com embed e arquivo', async () => {
+    const session = {
+      sessionId: 'sess-report-1',
+      projectPath: '/projetos/meu-proj',
+      agent: 'plan',
+      model: 'claude-sonnet',
+      status: 'finished',
+      outputBuffer: 'algum output da sessão',
+      createdAt: new Date(),
+      closedAt: null,
+      lastActivityAt: new Date(),
+    };
+    const sm = createSessionManager({ getByThreadResult: session });
+    const interaction = createInteraction({
+      commandName: 'report',
+      options: { description: 'Comportamento inesperado detectado', severity: 'high' },
+    });
+    interaction.channel.isThread.mockReturnValue(true);
+
+    await handleCommand(interaction, sm);
+
+    expect(interaction.deferReply).toHaveBeenCalledOnce();
+    expect(captureThreadMessages).toHaveBeenCalledWith(interaction.channel, 100);
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        embeds: expect.any(Array),
+        files: expect.any(Array),
+      }),
+    );
+  });
+
+  it('/report — create_issue=true com GitHub configurado → cria issue com conteúdo do relatório', async () => {
+    // Substitui o retorno de getGitHubClient por um cliente estável e rastreável
+    const stableGhClient = {
+      createIssue: vi.fn().mockResolvedValue({ number: 99, html_url: 'https://github.com/owner/repo/issues/99' }),
+    };
+    getGitHubClient.mockReturnValueOnce(stableGhClient);
+
+    const session = {
+      sessionId: 'sess-report-gh',
+      projectPath: '/projetos/gh-proj',
+      agent: 'plan',
+      model: 'claude-sonnet',
+      status: 'finished',
+      outputBuffer: '',
+      createdAt: new Date(),
+      closedAt: null,
+      lastActivityAt: new Date(),
+    };
+    const sm = createSessionManager({ getByThreadResult: session });
+    const interaction = createInteraction({
+      commandName: 'report',
+      options: { description: 'Erro crítico detectado', severity: 'critical' },
+    });
+    interaction.channel.isThread.mockReturnValue(true);
+    interaction.options.getBoolean.mockReturnValue(true); // create_issue=true
+
+    await handleCommand(interaction, sm);
+
+    expect(stableGhClient.createIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        owner: 'owner',
+        repo: 'repo',
+        labels: expect.arrayContaining(['bug', 'remoteflow-report']),
+      }),
+    );
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        embeds: expect.any(Array),
+        files: expect.any(Array),
+      }),
+    );
+  });
+
+  it('/report — create_issue=true com GitHub falhando → não crasha e editReply é chamado com aviso', async () => {
+    // Simula falha no GitHub — a exceção deve ser absorvida pelo handler
+    getGitHubClient.mockReturnValueOnce({
+      createIssue: vi.fn().mockRejectedValue(new Error('GitHub API error simulado')),
+    });
+
+    const sm = createSessionManager({ getByThreadResult: null });
+    const interaction = createInteraction({
+      commandName: 'report',
+      options: { description: 'Problema com GitHub indisponível', severity: 'medium' },
+    });
+    interaction.channel.isThread.mockReturnValue(true);
+    interaction.options.getBoolean.mockReturnValue(true); // create_issue=true
+
+    await handleCommand(interaction, sm);
+
+    // Não deve ter crashado — editReply deve ter sido chamado mesmo após falha do GitHub
+    expect(interaction.editReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        embeds: expect.any(Array),
+        files: expect.any(Array),
+      }),
     );
   });
 });
