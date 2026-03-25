@@ -96,6 +96,11 @@ class OpenCodeSession extends EventEmitter {
     this._allowedPatterns = new Set();
     /** @type {PlanReviewDetector|null} Detector de plano aguardando revisão (apenas para agent=plan) */
     this._planDetector = null;
+    /** @type {Function|null} Referências nomeadas de listeners do servidor (para remoção no close) */
+    this._onServerRestart = null;
+    this._onServerFatal = null;
+    this._onSSEReconnecting = null;
+    this._onSSEConnected = null;
   }
 
   /**
@@ -130,15 +135,37 @@ class OpenCodeSession extends EventEmitter {
 
     this.emit('status', 'idle');
 
-    this.server.on('restart', () => {
+    this._onServerRestart = () => {
       this.emit('server-restart');
-    });
+    };
 
-    this.server.on('fatal', (err) => {
+    this._onServerFatal = (err) => {
       this.status = 'error';
       this.emit('status', 'error');
       this.emit('error', new Error(`Servidor fatal: ${err?.message ?? err}`));
-    });
+    };
+
+    // Notifica a thread Discord sobre drops e reconexões SSE
+    this._onSSEReconnecting = ({ isConnectionDrop }) => {
+      if (!isConnectionDrop) return; // Só notifica para ECONNRESET, não drops normais
+      if (!['running', 'waiting_input', 'idle'].includes(this.status)) return;
+      this.emit('sse-status', 'reconnecting');
+    };
+
+    this._onSSEConnected = () => {
+      // Verifica se a sessão ainda está registrada no servidor opencode
+      const stillActive = this.server?._sessionRegistry?.has(this.apiSessionId)
+        ?? this.server?.sessionRegistry?.has(this.apiSessionId)
+        ?? true; // fallback permissivo se não encontrar o registry
+      if (!stillActive) return;
+      if (!['running', 'waiting_input', 'idle'].includes(this.status)) return;
+      this.emit('sse-status', 'reconnected');
+    };
+
+    this.server.on('restart', this._onServerRestart);
+    this.server.on('fatal', this._onServerFatal);
+    this.server.on('sse-reconnecting', this._onSSEReconnecting);
+    this.server.on('sse-connected', this._onSSEConnected);
   }
 
   /**
@@ -291,6 +318,14 @@ class OpenCodeSession extends EventEmitter {
       this.server.deregisterSession(this.apiSessionId);
     }
 
+    // Remove listeners do servidor para evitar vazamento de memória
+    if (this.server) {
+      if (this._onServerRestart) this.server.off('restart', this._onServerRestart);
+      if (this._onServerFatal) this.server.off('fatal', this._onServerFatal);
+      if (this._onSSEReconnecting) this.server.off('sse-reconnecting', this._onSSEReconnecting);
+      if (this._onSSEConnected) this.server.off('sse-connected', this._onSSEConnected);
+    }
+
     this.status = 'finished';
     this.closedAt = new Date();
     this.emit('status', 'finished');
@@ -304,6 +339,9 @@ class OpenCodeSession extends EventEmitter {
    * @param {{ type: string, data: object, id?: string }} event
    */
   handleSSEEvent(event) {
+    // Qualquer evento SSE indica que a sessão está ativa — reset do timeout
+    this.lastActivityAt = new Date();
+
     const type = event.type; // já desempacotado pelo server-manager para o tipo real
     const props = event.data?.properties ?? {};
 

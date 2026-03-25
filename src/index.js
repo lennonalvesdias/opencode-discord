@@ -116,7 +116,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isAutocomplete()) {
       await handleAutocomplete(interaction);
     } else if (interaction.isChatInputCommand()) {
-      await handleCommand(interaction, sessionManager);
+      await handleCommand(interaction, sessionManager, serverManager);
     } else {
       await handleInteraction(interaction, sessionManager);
     }

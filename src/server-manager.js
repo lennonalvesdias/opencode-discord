@@ -67,7 +67,7 @@ async function isPortAvailable(port) {
 
 /**
  * Representa um processo `opencode serve` vinculado a um caminho de projeto.
- * Emite: 'ready', 'restart', 'fatal'
+ * Emite: 'ready', 'restart', 'fatal', 'sse-reconnecting', 'sse-connected'
  */
 class OpenCodeServer extends EventEmitter {
   /**
@@ -89,6 +89,7 @@ class OpenCodeServer extends EventEmitter {
     this._portAllocator = portAllocator ?? null;
     this.plannotatorPort = plannotatorPort;
     this._circuitBreakerUntil = 0;
+    this._reconnecting = false;
 
     /** @type {Map<string, object>} Map<apiSessionId, OpenCodeSession> */
     this._sessionRegistry = new Map();
@@ -248,15 +249,24 @@ class OpenCodeServer extends EventEmitter {
   connectSSE(attempt = 0) {
     this.sseAbortController = new AbortController();
 
+    let reconnectScheduled = false;
+
     const reconnect = (err) => {
+      if (reconnectScheduled) return;
       if (this.status === 'stopped') return;
       if (err?.name === 'AbortError') return;
+      reconnectScheduled = true;
 
-      const maxDelay = 30_000;
-      const delay = Math.min(1000 * Math.pow(2, attempt), maxDelay);
+      const isConnectionDrop = err?.message === 'terminated' || err?.code === 'ECONNRESET';
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30_000);
 
-      debug('OpenCodeServer', '🔄 SSE desconectado (tentativa %d) — reconectando em %dms: %s', attempt + 1, delay, err?.message ?? 'stream encerrado');
-      this.emit('sse-reconnecting', { attempt: attempt + 1, delay });
+      if (isConnectionDrop) {
+        console.warn('[OpenCodeServer] 🔌 SSE drop detectado (ECONNRESET) — reconectando em %dms', delay);
+      } else {
+        debug('OpenCodeServer', '🔄 SSE desconectado (tentativa %d) — reconectando em %dms: %s', attempt + 1, delay, err?.message ?? 'stream encerrado');
+      }
+
+      this.emit('sse-reconnecting', { attempt: attempt + 1, delay, isConnectionDrop: !!isConnectionDrop });
 
       setTimeout(() => {
         if (this.status !== 'stopped') {
@@ -269,16 +279,50 @@ class OpenCodeServer extends EventEmitter {
     this.client.connectSSE(
       this.sseAbortController.signal,
       (event) => {
-        attempt = 0; // Reset do backoff ao receber evento com sucesso
+        if (attempt > 0) {
+          console.log('[OpenCodeServer] ✅ SSE reconectado após drop (tentativa %d)', attempt);
+          this.emit('sse-connected', { attempt });
+          attempt = 0;
+        } else {
+          attempt = 0;
+        }
         this._dispatchSSEEvent(event);
       },
       reconnect,
     ).then(() => {
       // Stream encerrou normalmente — reconectar apenas se não foi parada intencional
-      if (this.status !== 'stopped') reconnect();
+      // e não há reconexão manual em andamento (evita conexões paralelas)
+      if (this.status !== 'stopped' && !this._reconnecting) reconnect();
     }).catch(reconnect);
 
     debug('OpenCodeServer', '🔌 SSE conectado na porta %d', this.port);
+  }
+
+  /**
+   * Força a reconexão da conexão SSE, abortando a conexão atual e iniciando uma nova.
+   * Usado pelo comando /reconnect para recuperação manual.
+   * @returns {void}
+   */
+  reconnectSSE() {
+    if (this.status === 'stopped') {
+      throw new Error('Servidor está parado. Não é possível reconectar o SSE.');
+    }
+    if (this._reconnecting) return;
+    this._reconnecting = true;
+
+    console.log('[OpenCodeServer] 🔄 Reconexão SSE forçada manualmente — porta %d', this.port);
+
+    if (this.sseAbortController) {
+      this.sseAbortController.abort();
+    }
+
+    // Pequeno delay para garantir cleanup da conexão anterior
+    setTimeout(() => {
+      this._reconnecting = false;
+      if (this.status !== 'stopped') {
+        this.connectSSE(0);
+      }
+    }, 500);
   }
 
   /**

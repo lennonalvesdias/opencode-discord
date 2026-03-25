@@ -156,11 +156,12 @@ describe('parseSSEStream', () => {
     await expect(parseSSEStream({ body: stream }, () => {})).resolves.toBeUndefined();
   });
 
-  it('propaga erros não-AbortError e chama onError', async () => {
+  it('chama onError para erros não-AbortError (sem relançar)', async () => {
     const err = new Error('network error');
     const onError = vi.fn();
     const stream = new ReadableStream({ start(c) { c.error(err); } });
-    await expect(parseSSEStream({ body: stream }, () => {}, onError)).rejects.toThrow('network error');
+    // Não relança — onError é o canal designado; a promise deve resolver normalmente
+    await expect(parseSSEStream({ body: stream }, () => {}, onError)).resolves.toBeUndefined();
     expect(onError).toHaveBeenCalledWith(err);
   });
 });

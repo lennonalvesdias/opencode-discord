@@ -41,6 +41,10 @@ export class StreamHandler {
     this._pendingPlanReview = null;
     this.sentMessages = []; // mensagens anteriores para correção de tabelas no final
     this._pendingTableLines = ''; // linhas de tabela retidas entre flushes
+    /** Controla formatação visual do bloco de output do agente */
+    this._inOutputBlock = false;
+    /** Se true, o próximo create-message deve incluir header + blockquote */
+    this._outputBlockHeaderNeeded = false;
   }
 
   /**
@@ -50,6 +54,11 @@ export class StreamHandler {
     // Ouve output da sessão
     this.session.on('output', (chunk) => {
       this.hasOutput = true;
+      // Marca início de bloco de output; se currentMessage é null, o próximo send precisa de header
+      if (!this._inOutputBlock) {
+        this._inOutputBlock = true;
+        this._outputBlockHeaderNeeded = (this.currentMessage === null);
+      }
       this.currentContent += chunk;
       this.scheduleUpdate();
     });
@@ -171,6 +180,23 @@ export class StreamHandler {
         console.error('[StreamHandler] Erro ao enviar pergunta do agente:', err.message)
       );
     });
+
+    // Notifica a thread sobre drops e reconexões da conexão SSE
+    let lastSSENotify = 0;
+    this.session.on('sse-status', async (status) => {
+      const now = Date.now();
+      if (status === 'reconnecting' && now - lastSSENotify < 30_000) return;
+      if (status === 'reconnecting') lastSSENotify = now;
+      try {
+        if (status === 'reconnecting') {
+          await this.thread.send('⚠️ Conexão com o servidor perdida. Tentando reconectar...');
+        } else if (status === 'reconnected') {
+          await this.thread.send('✅ Conexão restaurada. A sessão continua ativa.');
+        }
+      } catch (err) {
+        console.error('[StreamHandler] ❌ Erro ao notificar thread sobre SSE:', err.message);
+      }
+    });
   }
 
   /**
@@ -290,8 +316,9 @@ export class StreamHandler {
     // Se nada restou para enviar (tabela ainda incompleta), aguarda próximo flush
     if (!content.trim()) return;
 
-    // Divide em chunks respeitando o limite Discord
-    const chunks = splitIntoChunks(content, MSG_LIMIT);
+    // Divide em chunks respeitando o limite Discord; reserva espaço para o prefixo de blockquote
+    const prefixReserve = this._inOutputBlock ? 30 : 0;
+    const chunks = splitIntoChunks(content, MSG_LIMIT - prefixReserve);
     debug('StreamHandler', `🚿 flush iniciado | conteúdo=${content.length} chars | chunks a enviar=${chunks.length}`);
 
     for (const chunk of chunks) {
@@ -325,9 +352,19 @@ export class StreamHandler {
             content: this.currentRawContent,
           });
         }
-        this.currentMessage = await this.thread.send(chunk);
-        this.currentRawContent = chunk;
-        this.currentMessageLength = chunk.length;
+        // Aplica formatação de bloco de output (header sutil + blockquote)
+        let sendChunk = chunk;
+        if (this._inOutputBlock) {
+          if (this._outputBlockHeaderNeeded) {
+            sendChunk = '-# 💭 análise do agente\n>>> ' + chunk;
+            this._outputBlockHeaderNeeded = false;
+          } else {
+            sendChunk = '>>> ' + chunk;
+          }
+        }
+        this.currentMessage = await this.thread.send(sendChunk);
+        this.currentRawContent = sendChunk;
+        this.currentMessageLength = sendChunk.length;
       } catch (err) {
         debug('StreamHandler', `❌ erro ao enviar: ${err.message}`);
         console.error('[StreamHandler] Erro ao enviar mensagem:', err.message);
@@ -386,9 +423,13 @@ export class StreamHandler {
                   if (this.currentMessage) {
                     this.sentMessages.push({ message: this.currentMessage, content: this.currentRawContent });
                   }
-                  this.currentMessage = await this.thread.send(chunk);
-                  this.currentRawContent = chunk;
-                  this.currentMessageLength = chunk.length;
+                  let finalSendChunk = chunk;
+                  if (this._inOutputBlock) {
+                    finalSendChunk = '>>> ' + chunk;
+                  }
+                  this.currentMessage = await this.thread.send(finalSendChunk);
+                  this.currentRawContent = finalSendChunk;
+                  this.currentMessageLength = finalSendChunk.length;
                 }
               }
             }
@@ -428,6 +469,8 @@ export class StreamHandler {
         this.currentRawContent = '';
         this.currentMessageLength = 0;
         this.hasOutput = false;
+        this._inOutputBlock = false;
+        this._outputBlockHeaderNeeded = false;
       }
     } catch (err) {
       console.error('[StreamHandler] Erro ao enviar status:', err.message);

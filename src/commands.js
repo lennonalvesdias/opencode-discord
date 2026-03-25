@@ -313,6 +313,10 @@ export const commandDefinitions = [
         .setDescription('Criar GitHub Issue com o relatório completo')
         .setRequired(false)
     ),
+
+  new SlashCommandBuilder()
+    .setName('reconnect')
+    .setDescription('Reconecta a sessão SSE do servidor opencode deste thread'),
 ].map((c) => c.toJSON());
 
 // ─── Handler de comandos ──────────────────────────────────────────────────────
@@ -321,8 +325,9 @@ export const commandDefinitions = [
  * Processa um slash command recebido
  * @param {import('discord.js').ChatInputCommandInteraction} interaction
  * @param {import('./session-manager.js').SessionManager} sessionManager
+ * @param {import('./server-manager.js').ServerManager} serverManager
  */
-export async function handleCommand(interaction, sessionManager) {
+export async function handleCommand(interaction, sessionManager, serverManager) {
   // Guard: ignora interações expiradas (reenviadas pelo gateway ao reconectar)
   const AGE_LIMIT_MS = 2500;
   if (Date.now() - interaction.createdTimestamp > AGE_LIMIT_MS) {
@@ -370,6 +375,8 @@ export async function handleCommand(interaction, sessionManager) {
     await handleIssueCommand(interaction, sessionManager);
   } else if (commandName === 'report') {
     await handleReport(interaction, sessionManager);
+  } else if (commandName === 'reconnect') {
+    await handleReconnect(interaction, sessionManager, serverManager);
   }
 }
 
@@ -1313,6 +1320,48 @@ async function handleIssueImplement(interaction, sessionManager) {
   } catch (err) {
     console.error('[commands] ❌ Erro ao iniciar implementação:', err.message);
     await interaction.editReply(`❌ Erro ao iniciar implementação da issue: ${err.message}`);
+  }
+}
+
+// ─── /reconnect ───────────────────────────────────────────────────────────────
+
+/**
+ * Força a reconexão SSE do servidor opencode para a sessão na thread atual.
+ * Útil para recuperação manual após queda de conexão (ECONNRESET/terminated).
+ * @param {import('discord.js').ChatInputCommandInteraction} interaction
+ * @param {import('./session-manager.js').SessionManager} sessionManager
+ * @param {import('./server-manager.js').ServerManager} serverManager
+ */
+async function handleReconnect(interaction, sessionManager, serverManager) {
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (err) {
+    if (err.code === 10062) return; // Interação expirada
+    throw err;
+  }
+
+  const session = sessionManager.getByThread(interaction.channelId);
+  if (!session) {
+    await interaction.editReply('❌ Nenhuma sessão ativa encontrada neste thread.');
+    return;
+  }
+
+  const server = serverManager.getServer(session.projectPath);
+  if (!server) {
+    await interaction.editReply('❌ Servidor não encontrado para este projeto.');
+    return;
+  }
+
+  if (server.status === 'stopped' || server.status === 'error') {
+    await interaction.editReply(`❌ Servidor está no estado \`${server.status}\`. Use \`/plan\` ou \`/build\` para iniciar uma nova sessão.`);
+    return;
+  }
+
+  try {
+    server.reconnectSSE();
+    await interaction.editReply('🔄 Reconexão SSE iniciada. Se a tarefa ainda estava em andamento, a conexão será restaurada automaticamente.');
+  } catch (err) {
+    await interaction.editReply(`❌ Erro ao reconectar: ${err.message}`);
   }
 }
 

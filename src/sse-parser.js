@@ -85,8 +85,14 @@ export async function parseSSEStream(response, onEvent, onError) {
   } catch (err) {
     if (err.name === 'AbortError') return;
 
-    console.error('[SSEParser] ❌ Erro ao ler stream:', err);
+    const isConnectionDrop = err.message === 'terminated' || err.code === 'ECONNRESET';
+    if (isConnectionDrop) {
+      console.warn('[SSEParser] 🔌 Conexão SSE encerrada pelo servidor (%s)', err.message);
+    } else {
+      console.error('[SSEParser] ❌ Erro ao ler stream:', err);
+    }
+
     onError?.(err);
-    throw err;
+    // NÃO relançar — onError é o canal designado para erros de conexão
   }
 }
