@@ -45,6 +45,18 @@ export class StreamHandler {
     this._inOutputBlock = false;
     /** Se true, o próximo create-message deve incluir header + blockquote */
     this._outputBlockHeaderNeeded = false;
+    /** Buffer de conteúdo de reasoning acumulado antes do flush */
+    this.reasoningContent = '';
+    /** Timer para flush de reasoning (debounced 400ms) */
+    this.reasoningTimer = null;
+    /** Timer para detectar gap de tool call (2500ms sem output) */
+    this._gapTimer = null;
+    /** Se o indicador de tool activity já foi enviado neste gap atual */
+    this._toolActivitySent = false;
+    /** Buffer para classificação de narração no início do ciclo */
+    this._narrationBuffer = '';
+    /** Se ainda estamos na fase de narração inicial do ciclo */
+    this._inNarrationPhase = false;
   }
 
   /**
@@ -54,13 +66,42 @@ export class StreamHandler {
     // Ouve output da sessão
     this.session.on('output', (chunk) => {
       this.hasOutput = true;
-      // Marca início de bloco de output; se currentMessage é null, o próximo send precisa de header
+
+      // Cancela indicador de gap/tool activity ao receber output
+      if (this._gapTimer) {
+        clearTimeout(this._gapTimer);
+        this._gapTimer = null;
+      }
+      this._toolActivitySent = false;
+
       if (!this._inOutputBlock) {
         this._inOutputBlock = true;
-        this._outputBlockHeaderNeeded = (this.currentMessage === null);
+        this._inNarrationPhase = true; // começa fase de narração no início de cada ciclo
+        this._narrationBuffer = '';
+        this._outputBlockHeaderNeeded = false; // já não usamos header
       }
-      this.currentContent += chunk;
-      this.scheduleUpdate();
+
+      // Classificação de narração: só na fase inicial do ciclo
+      if (this._inNarrationPhase) {
+        this._processNarrationChunk(chunk);
+      } else {
+        this.currentContent += chunk;
+        this.scheduleUpdate();
+      }
+
+      // Agenda detector de gap (tool em execução)
+      this._scheduleGapDetector();
+    });
+
+    // Ouve chunks de reasoning e exibe de forma sutil
+    this.session.on('reasoning', (chunk) => {
+      this.reasoningContent += chunk;
+      this._scheduleReasoningFlush();
+      // Cancela gap detector: IA está pensando ativamente, não executando ferramenta
+      if (this._gapTimer) {
+        clearTimeout(this._gapTimer);
+        this._gapTimer = null;
+      }
     });
 
     // Quando a sessão muda de status — usa fila para evitar burst de rate limit
@@ -72,6 +113,10 @@ export class StreamHandler {
         // Reseta hasOutput ao retomar execução para que "Processando..." apareça novamente
         if (status === 'running') {
           this.hasOutput = false;
+          this._inOutputBlock = false;     // força novo bloco de output no próximo ciclo
+          this._inNarrationPhase = false;
+          this._narrationBuffer = '';
+          this._toolActivitySent = false;
         }
         // Informa o usuário quando há mensagens enfileiradas prestes a serem enviadas
         const isTaskCompleted = status === 'finished' && this.session.status === 'idle';
@@ -316,8 +361,8 @@ export class StreamHandler {
     // Se nada restou para enviar (tabela ainda incompleta), aguarda próximo flush
     if (!content.trim()) return;
 
-    // Divide em chunks respeitando o limite Discord; reserva espaço para o prefixo de blockquote
-    const prefixReserve = this._inOutputBlock ? 30 : 0;
+    // Divide em chunks respeitando o limite Discord; sem reserva de prefixo
+    const prefixReserve = 0;
     const chunks = splitIntoChunks(content, MSG_LIMIT - prefixReserve);
     debug('StreamHandler', `🚿 flush iniciado | conteúdo=${content.length} chars | chunks a enviar=${chunks.length}`);
 
@@ -352,16 +397,8 @@ export class StreamHandler {
             content: this.currentRawContent,
           });
         }
-        // Aplica formatação de bloco de output (header sutil + blockquote)
-        let sendChunk = chunk;
-        if (this._inOutputBlock) {
-          if (this._outputBlockHeaderNeeded) {
-            sendChunk = '-# 💭 análise do agente\n>>> ' + chunk;
-            this._outputBlockHeaderNeeded = false;
-          } else {
-            sendChunk = '>>> ' + chunk;
-          }
-        }
+        // Texto de resposta enviado limpo, sem blockquote
+        const sendChunk = chunk;
         this.currentMessage = await this.thread.send(sendChunk);
         this.currentRawContent = sendChunk;
         this.currentMessageLength = sendChunk.length;
@@ -405,6 +442,12 @@ export class StreamHandler {
 
         // Para estados finais, envia status visual e reseta o bloco atual
         if (status === 'finished' || status === 'error' || status === 'restart') {
+          // Garante que conteúdo pendente da fase de narração não se perca
+          if (this._narrationBuffer) {
+            this.currentContent += this._narrationBuffer;
+            this._narrationBuffer = '';
+            this._inNarrationPhase = false;
+          }
           // Converte e envia quaisquer linhas de tabela retidas ao final do stream
           const finalInput = this._pendingTableLines + (this.currentContent || '');
           this._pendingTableLines = '';
@@ -423,13 +466,9 @@ export class StreamHandler {
                   if (this.currentMessage) {
                     this.sentMessages.push({ message: this.currentMessage, content: this.currentRawContent });
                   }
-                  let finalSendChunk = chunk;
-                  if (this._inOutputBlock) {
-                    finalSendChunk = '>>> ' + chunk;
-                  }
-                  this.currentMessage = await this.thread.send(finalSendChunk);
-                  this.currentRawContent = finalSendChunk;
-                  this.currentMessageLength = finalSendChunk.length;
+                  this.currentMessage = await this.thread.send(chunk);
+                  this.currentRawContent = chunk;
+                  this.currentMessageLength = chunk.length;
                 }
               }
             }
@@ -507,6 +546,14 @@ export class StreamHandler {
     if (this._archiveTimer) {
       clearTimeout(this._archiveTimer);
       this._archiveTimer = null;
+    }
+    if (this.reasoningTimer) {
+      clearTimeout(this.reasoningTimer);
+      this.reasoningTimer = null;
+    }
+    if (this._gapTimer) {
+      clearTimeout(this._gapTimer);
+      this._gapTimer = null;
     }
     this._clearPendingPermission();
     this._clearPendingPlanReview();
@@ -740,6 +787,141 @@ export class StreamHandler {
    */
   _clearPendingPlanReview() {
     this._pendingPlanReview = null;
+  }
+
+  // ─── Classificação de Conteúdo ────────────────────────────────────────────────
+
+  /** Padrões que indicam narração interna da IA (não destinada ao usuário) */
+  static NARRATION_PATTERNS = [
+    /^The user (wants|asked|is asking|needs|wants to)\b/i,
+    /^I (should|need to|will|'ll|am going to|want to)\b/i,
+    /^Let me\b/i,
+    /^I'm going to\b/i,
+    /^Looking at\b/i,
+    /^First,? (let me|I need|I should)\b/i,
+    /^I'll\b/i,
+  ];
+
+  /** Máximo de caracteres de narração antes de desistir da classificação */
+  static MAX_NARRATION_BUFFER = 600;
+
+  /**
+   * Processa chunks de texto na fase de narração inicial do ciclo.
+   * Classifica linhas como narração (→ reasoning) ou resposta real (→ output normal).
+   * @param {string} chunk
+   */
+  _processNarrationChunk(chunk) {
+    this._narrationBuffer += chunk;
+
+    // Se o buffer excedeu o limite, desiste da fase de narração
+    if (this._narrationBuffer.length > StreamHandler.MAX_NARRATION_BUFFER) {
+      this._exitNarrationPhase(true);  // conteúdo não classificado vai para output normal
+      return;
+    }
+
+    // Processa linhas completas no buffer
+    const lines = this._narrationBuffer.split('\n');
+    const incompleteLine = lines.pop(); // última parte (ainda incompleta)
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        // Linha vazia — pode ser separador entre narração e resposta
+        this.reasoningContent += line + '\n';
+        this._scheduleReasoningFlush();
+        continue;
+      }
+
+      const isNarration = StreamHandler.NARRATION_PATTERNS.some(p => p.test(trimmed));
+      if (isNarration) {
+        this.reasoningContent += line + '\n';
+        this._scheduleReasoningFlush();
+      } else {
+        // Encontrou linha que não é narração → sai da fase, trata tudo como resposta
+        this._narrationBuffer = line + '\n' + incompleteLine;
+        this._exitNarrationPhase(true);
+        return;
+      }
+    }
+
+    // Ainda só tem linha incompleta no buffer
+    this._narrationBuffer = incompleteLine;
+  }
+
+  /**
+   * Encerra a fase de narração e trata o buffer restante como output normal.
+   * @param {boolean} hasRemainingContent - Se há conteúdo no _narrationBuffer para enviar
+   */
+  _exitNarrationPhase(hasRemainingContent) {
+    this._inNarrationPhase = false;
+    if (hasRemainingContent && this._narrationBuffer) {
+      this.currentContent += this._narrationBuffer;
+      this._narrationBuffer = '';
+      this.scheduleUpdate();
+    } else {
+      this._narrationBuffer = '';
+    }
+  }
+
+  // ─── Reasoning ────────────────────────────────────────────────────────────────
+
+  /**
+   * Agenda flush de reasoning com debounce de 400ms.
+   */
+  _scheduleReasoningFlush() {
+    if (this.reasoningTimer) clearTimeout(this.reasoningTimer);
+    this.reasoningTimer = setTimeout(() => {
+      this.reasoningTimer = null;
+      this._flushReasoning();
+    }, 400);
+  }
+
+  /**
+   * Envia conteúdo de reasoning acumulado de forma sutil.
+   * Formato: -# 💭 *texto...*
+   * Trunca em 400 chars para não sobrecarregar o Discord.
+   */
+  async _flushReasoning() {
+    if (!this.reasoningContent.trim()) return;
+
+    const MAX_REASONING = 400;
+    let text = this.reasoningContent.trim();
+    this.reasoningContent = '';
+
+    if (text.length > MAX_REASONING) {
+      text = text.slice(0, MAX_REASONING).trimEnd() + '…';
+    }
+
+    // Colapsa múltiplas linhas em texto único para small-text
+    const singleLine = text.replace(/\n+/g, ' ').trim();
+    const formatted = `-# 💭 *${singleLine}*`;
+
+    try {
+      await this.thread.send(formatted);
+    } catch (err) {
+      debug('StreamHandler', `⚠️ Erro ao enviar reasoning: ${err.message}`);
+    }
+  }
+
+  // ─── Detector de Gap (Tool Activity) ─────────────────────────────────────────
+
+  /**
+   * Agenda detector de gap: se nenhum output chegar em 2500ms durante sessão ativa,
+   * considera que uma ferramenta está executando e mostra indicador sutil.
+   */
+  _scheduleGapDetector() {
+    if (this._gapTimer) clearTimeout(this._gapTimer);
+    this._gapTimer = setTimeout(async () => {
+      this._gapTimer = null;
+      if (this.session.status !== 'running' || !this.hasOutput) return;
+      if (this._toolActivitySent) return;
+      this._toolActivitySent = true;
+      try {
+        await this.thread.send('-# ⚙️ processando...');
+      } catch (err) {
+        debug('StreamHandler', `⚠️ Erro ao enviar indicador de tool: ${err.message}`);
+      }
+    }, 2500);
   }
 }
 

@@ -6,6 +6,34 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.
 
 ---
 
+## [1.6.1] — 2026-03-28
+
+### 🐛 Fixed
+- Buffer de narração com overflow agora move conteúdo para output normal em vez de descartá-lo silenciosamente (`_exitNarrationPhase(true)`)
+- Conteúdo preso em `_narrationBuffer` ao término de sessão (`finished`/`error`/`restart`) é agora preservado e enviado ao Discord antes do flush final
+- Timers `reasoningTimer` e `_gapTimer` agora recebem `null` após `clearTimeout` em `stop()`, evitando referências dangling
+- Evento `reasoning` cancela o gap detector imediatamente, evitando falso indicador de tool activity durante raciocínio ativo da IA
+- Remoção de código morto: bloco `if (_outputBlockHeaderNeeded)` em `flush()` que nunca executava
+- Reset de `_inOutputBlock` adicionado ao handler de `status === 'running'`, garantindo novo ciclo limpo em sessões multi-rodada
+
+### 🧪 Tests
+- 2 novos testes de edge case para `_processNarrationChunk()`: overflow sem perda de conteúdo e sessão encerrada durante fase de narração
+
+---
+
+## [1.6.0] — 2026-03-28
+
+### ✨ Added
+- Exibição de conteúdo de reasoning da IA no Discord: pensamento interno exibido como texto sutil `-# 💭 *...*`, truncado em 400 chars para não sobrecarregar o canal
+- Indicador de atividade de ferramentas: quando o agente está executando uma ferramenta sem produzir output por 2500ms, exibe `-# ⚙️ processando...` de forma sutil
+- Heurística de narração: texto inicial do ciclo que detecta padrões de narração interna da IA (`"The user wants..."`, `"I should..."`, `"Let me..."`) é roteado automaticamente para exibição de reasoning em vez de output normal
+
+### 🔧 Changed
+- Resposta do agente agora é exibida como texto limpo, sem blockquote `>>>` nem cabeçalho `-# 💭 análise do agente`
+- Campo `reasoning` do SSE (`message.part.delta` com `field: 'reasoning'`) agora emite evento separado `'reasoning'` no `session-manager` em vez de ser descartado silenciosamente
+
+---
+
 ## [1.5.0] — 2026-03-28
 
 ### ✨ Added

@@ -347,10 +347,21 @@ class OpenCodeSession extends EventEmitter {
 
     switch (type) {
       case 'message.part.delta': {
-        // Só processar deltas de texto (não reasoning)
-        if (props.field !== 'text') return;
         const delta = props.delta ?? '';
         if (!delta) return;
+
+        // Reasoning → emite evento separado para exibição sutil no Discord
+        if (props.field === 'reasoning') {
+          const clean = stripAnsi(delta);
+          this.emit('reasoning', clean);
+          return;
+        }
+
+        // Outros campos desconhecidos → ignora com log de debug
+        if (props.field !== 'text') {
+          debug('SessionManager', `[SSE] campo ignorado: field=${props.field}`);
+          return;
+        }
 
         const clean = stripAnsi(delta);
         this.outputBuffer += clean;

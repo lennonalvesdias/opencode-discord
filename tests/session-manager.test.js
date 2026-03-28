@@ -587,15 +587,19 @@ describe('OpenCodeSession', () => {
 
   // ─── handleSSEEvent — message.part.delta (casos adicionais) ─────────────────
 
-  it('handleSSEEvent message.part.delta ignora campos diferentes de text', async () => {
+  it('handleSSEEvent message.part.delta com field=reasoning emite reasoning e não emite output', async () => {
     await session.start(serverManager)
     const outputs = []
+    const reasonings = []
     session.on('output', (t) => outputs.push(t))
+    session.on('reasoning', (t) => reasonings.push(t))
     session.handleSSEEvent({
       type: 'message.part.delta',
       data: { properties: { field: 'reasoning', delta: 'raciocínio interno' } }
     })
     expect(outputs).toHaveLength(0)
+    expect(reasonings).toHaveLength(1)
+    expect(reasonings[0]).toContain('raciocínio interno')
   })
 
   it('handleSSEEvent message.part.delta ignora delta vazio', async () => {
@@ -607,6 +611,20 @@ describe('OpenCodeSession', () => {
       data: { properties: { field: 'text', delta: '' } }
     })
     expect(outputs).toHaveLength(0)
+  })
+
+  it('handleSSEEvent message.part.delta com campo desconhecido não emite output nem reasoning', async () => {
+    await session.start(serverManager)
+    const outputs = []
+    const reasonings = []
+    session.on('output', (t) => outputs.push(t))
+    session.on('reasoning', (t) => reasonings.push(t))
+    session.handleSSEEvent({
+      type: 'message.part.delta',
+      data: { properties: { field: 'unknown_field', delta: 'conteúdo ignorado' } }
+    })
+    expect(outputs).toHaveLength(0)
+    expect(reasonings).toHaveLength(0)
   })
 
   it('handleSSEEvent message.part.delta em status waiting_input transita de volta para running', async () => {

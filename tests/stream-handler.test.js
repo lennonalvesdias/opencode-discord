@@ -137,15 +137,17 @@ describe('StreamHandler', () => {
 
     it('ao emitir output, currentContent acumula o texto recebido', () => {
       handler.start();
-      session.emit('output', 'linha de saída do agente');
-      expect(handler.currentContent).toBe('linha de saída do agente');
+      // Newline necessária para encerrar fase de narração e enviar para currentContent
+      session.emit('output', 'linha de saída do agente\n');
+      expect(handler.currentContent).toBe('linha de saída do agente\n');
     });
 
     it('ao emitir output em sequência, currentContent concatena todos os chunks', () => {
       handler.start();
-      session.emit('output', 'parte 1');
-      session.emit('output', ' parte 2');
-      expect(handler.currentContent).toBe('parte 1 parte 2');
+      // Primeiro chunk com newline encerra fase de narração; segundo vai direto ao currentContent
+      session.emit('output', 'parte 1\n');
+      session.emit('output', ' parte 2\n');
+      expect(handler.currentContent).toBe('parte 1\n parte 2\n');
     });
 
     it('ao emitir output, hasOutput torna-se true', () => {
@@ -159,7 +161,8 @@ describe('StreamHandler', () => {
       handler.start();
       // Sem output o timer não existe
       expect(handler.updateTimer).toBeNull();
-      session.emit('output', 'texto qualquer');
+      // Newline necessária para encerrar fase de narração e chamar scheduleUpdate
+      session.emit('output', 'texto qualquer\n');
       // Após output, timer deve estar agendado
       expect(handler.updateTimer).not.toBeNull();
     });
@@ -180,7 +183,8 @@ describe('StreamHandler', () => {
 
     it('stop() após emissão de output zera updateTimer', () => {
       handler.start();
-      session.emit('output', 'texto'); // dispara scheduleUpdate → define updateTimer
+      // Newline necessária para encerrar fase de narração e chamar scheduleUpdate → define updateTimer
+      session.emit('output', 'texto\n'); // dispara scheduleUpdate → define updateTimer
       expect(handler.updateTimer).not.toBeNull();
 
       handler.stop();
@@ -1033,6 +1037,157 @@ describe('StreamHandler', () => {
       });
       await flushPromises(5);
       // Passa se nenhuma exceção não capturada for lançada
+    });
+  });
+
+  // ─── evento 'reasoning' da sessão ────────────────────────────────────────────
+
+  describe("evento 'reasoning' da sessão", () => {
+    it('envia mensagem no formato -# 💭 *texto* após debounce de 400ms', async () => {
+      handler.start();
+      session.emit('reasoning', 'pensamento do agente');
+
+      await vi.advanceTimersByTimeAsync(400);
+      await flushPromises();
+
+      expect(thread.send).toHaveBeenCalledWith('-# 💭 *pensamento do agente*');
+    });
+
+    it('trunca reasoning maior que 400 chars e adiciona reticências', async () => {
+      handler.start();
+      session.emit('reasoning', 'x'.repeat(500));
+
+      await vi.advanceTimersByTimeAsync(400);
+      await flushPromises();
+
+      const expected = '-# 💭 *' + 'x'.repeat(400) + '…*';
+      expect(thread.send).toHaveBeenCalledWith(expected);
+    });
+
+    it('não envia mensagem quando reasoning contém apenas espaços em branco', async () => {
+      handler.start();
+      session.emit('reasoning', '   ');
+
+      await vi.advanceTimersByTimeAsync(400);
+      await flushPromises();
+
+      expect(thread.send).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── output sem blockquote '>>>' ──────────────────────────────────────────────
+
+  describe("output sem blockquote '>>>'", () => {
+    it('texto do output é enviado limpo, sem prefixo >>>', async () => {
+      handler.start();
+      session.emit('output', 'resposta do agente\n');
+
+      await vi.advanceTimersByTimeAsync(1500);
+      await flushPromises();
+
+      expect(thread.send).toHaveBeenCalled();
+      const [sent] = thread.send.mock.calls[0];
+      expect(typeof sent).toBe('string');
+      expect(sent).not.toContain('>>>');
+    });
+  });
+
+  // ─── _processNarrationChunk() — heurística de narração ───────────────────────
+
+  describe('_processNarrationChunk() — heurística de narração', () => {
+    it('texto iniciando com "The user wants" é roteado para reasoning, não para currentContent', async () => {
+      handler.start();
+      session.emit('output', 'The user wants clarification\n');
+
+      // Narração não deve ir para currentContent
+      expect(handler.currentContent).toBe('');
+
+      // Deve ir para reasoning após o debounce de 400ms
+      await vi.advanceTimersByTimeAsync(400);
+      await flushPromises();
+
+      expect(thread.send).toHaveBeenCalledWith(
+        expect.stringContaining('💭')
+      );
+      expect(thread.send).toHaveBeenCalledWith(
+        expect.stringContaining('The user wants clarification')
+      );
+    });
+
+    it('texto que não é narração não é enviado como reasoning', async () => {
+      handler.start();
+      session.emit('output', 'Resposta direta ao usuário\n');
+
+      // Avança apenas o debounce de reasoning — não deve haver chamada de reasoning
+      await vi.advanceTimersByTimeAsync(400);
+      await flushPromises();
+
+      const reasoningCalls = thread.send.mock.calls.filter(([arg]) =>
+        typeof arg === 'string' && arg.includes('💭')
+      );
+      expect(reasoningCalls).toHaveLength(0);
+    });
+
+    it('conteúdo que excede MAX_NARRATION_BUFFER vai para output normal, não é descartado', async () => {
+      handler.start();
+      // Emite chunk maior que 600 chars com newline — deve sair para output, não ser descartado
+      const longChunk = 'A'.repeat(650) + '\n';
+      session.emit('output', longChunk);
+
+      // A fase de narração deve ter terminado com o conteúdo preservado
+      expect(handler._inNarrationPhase).toBe(false);
+
+      await vi.runAllTimersAsync();
+      await flushPromises();
+
+      // Conteúdo NÃO deve ter sido descartado — deve ter sido enviado ao Discord
+      expect(thread.send).toHaveBeenCalled();
+      const calls = thread.send.mock.calls.map(([c]) => c);
+      expect(calls.some(c => typeof c === 'string' && c.includes('A'.repeat(10)))).toBe(true);
+    });
+
+    it('_narrationBuffer é preservado e exibido quando sessão termina durante fase de narração', async () => {
+      handler.start();
+      // Emite conteúdo sem newline — fica preso em _narrationBuffer como linha incompleta
+      session.emit('output', 'Texto sem newline final');
+
+      // Verifica que o conteúdo está preso na fase de narração
+      expect(handler._inNarrationPhase).toBe(true);
+      expect(handler._narrationBuffer).toBe('Texto sem newline final');
+
+      // Sessão termina com conteúdo ainda no buffer de narração
+      await handler.sendStatusMessage('finished');
+      await flushPromises();
+
+      // O conteúdo NÃO deve ter sido perdido — deve aparecer no Discord
+      const allCalls = thread.send.mock.calls.map(([c]) => c);
+      expect(allCalls.some(c => typeof c === 'string' && c.includes('Texto sem newline final'))).toBe(true);
+    });
+  });
+
+  // ─── _scheduleGapDetector() — indicador de tool activity ──────────────────────
+
+  describe('_scheduleGapDetector() — indicador de tool activity', () => {
+    it('envia "-# ⚙️ processando..." após 2500ms de silêncio com sessão running', async () => {
+      handler.start();
+      session.status = 'running';
+      session.emit('output', 'alguma saída');
+
+      await vi.advanceTimersByTimeAsync(2500);
+      await flushPromises();
+
+      expect(thread.send).toHaveBeenCalledWith('-# ⚙️ processando...');
+    });
+
+    it('não envia indicador quando sessão não está running', async () => {
+      handler.start();
+      session.status = 'idle';
+      session.emit('output', 'alguma saída');
+
+      await vi.advanceTimersByTimeAsync(2500);
+      await flushPromises();
+
+      expect(thread.send).not.toHaveBeenCalledWith('-# ⚙️ processando...');
     });
   });
 });
