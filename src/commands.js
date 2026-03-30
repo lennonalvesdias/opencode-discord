@@ -29,6 +29,7 @@ import { getGitHubClient } from './github.js';
 import { analyzeOutput, captureThreadMessages, formatReportText, buildReportEmbed, readRecentLogs } from './reporter.js';
 import { getRepoInfo, hasChanges, createBranchAndCommit, pushBranch } from './git.js';
 import { PlannotatorClient } from './plannotator-client.js';
+import { loadSessions, removeSession, saveSession } from './persistence.js';
 
 const commandRateLimiter = new RateLimiter({ maxActions: 5, windowMs: 60_000 });
 
@@ -1328,42 +1329,119 @@ async function handleIssueImplement(interaction, sessionManager) {
 // ─── /reconnect ───────────────────────────────────────────────────────────────
 
 /**
- * Força a reconexão SSE do servidor opencode para a sessão na thread atual.
- * Útil para recuperação manual após queda de conexão (ECONNRESET/terminated).
+ * Reconecta a sessão na thread atual.
+ * Caso 1: Sessão ativa em memória → reconexão SSE (comportamento original).
+ * Caso 2: Sessão interrompida por reinício → cria nova sessão com os mesmos dados.
  * @param {import('discord.js').ChatInputCommandInteraction} interaction
  * @param {import('./session-manager.js').SessionManager} sessionManager
  * @param {import('./server-manager.js').ServerManager} serverManager
  */
 async function handleReconnect(interaction, sessionManager, serverManager) {
+  const channelId = interaction.channelId;
+
+  // Caso 1: sessão ativa em memória → reconexão SSE (comportamento atual)
+  const session = sessionManager.getByThread(channelId);
+  if (session) {
+    try {
+      await interaction.deferReply({ ephemeral: true });
+    } catch (err) {
+      if (err.code === 10062) return; // Interação expirada
+      throw err;
+    }
+
+    const server = serverManager.getServer(session.projectPath);
+    if (!server) {
+      await interaction.editReply('❌ Servidor não encontrado para este projeto.');
+      return;
+    }
+
+    if (server.status === 'stopped' || server.status === 'error') {
+      await interaction.editReply(`❌ Servidor está no estado \`${server.status}\`. Use \`/plan\` ou \`/build\` para iniciar uma nova sessão.`);
+      return;
+    }
+
+    try {
+      server.reconnectSSE();
+      await interaction.editReply('🔄 Reconexão SSE iniciada. Se a tarefa ainda estava em andamento, a conexão será restaurada automaticamente.');
+    } catch (err) {
+      await interaction.editReply(`❌ Erro ao reconectar: ${err.message}`);
+    }
+    return;
+  }
+
+  // Caso 2: busca sessão interrompida na persistência
+  let allSessions;
   try {
-    await interaction.deferReply({ ephemeral: true });
+    allSessions = await loadSessions();
+  } catch (err) {
+    console.error('[Reconnect] Erro ao carregar sessões persistidas:', err);
+    await interaction.reply({
+      content: '❌ Erro ao carregar sessões. Tente novamente em alguns instantes.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const interrupted = allSessions.find(
+    (s) => s.threadId === channelId && s.status === 'interrupted'
+  );
+
+  if (!interrupted) {
+    await interaction.reply({
+      content: '❌ Nenhuma sessão ativa ou interrompida neste thread.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Guarda contra condição de corrida — verifica se sessão já foi restaurada neste thread
+  if (sessionManager.getByThread(channelId)) {
+    await interaction.reply({
+      content: '⚠️ Uma sessão já está ativa neste thread. Use `/status` para verificar.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  try {
+    await interaction.deferReply();
   } catch (err) {
     if (err.code === 10062) return; // Interação expirada
     throw err;
   }
 
-  const session = sessionManager.getByThread(interaction.channelId);
-  if (!session) {
-    await interaction.editReply('❌ Nenhuma sessão ativa encontrada neste thread.');
-    return;
-  }
-
-  const server = serverManager.getServer(session.projectPath);
-  if (!server) {
-    await interaction.editReply('❌ Servidor não encontrado para este projeto.');
-    return;
-  }
-
-  if (server.status === 'stopped' || server.status === 'error') {
-    await interaction.editReply(`❌ Servidor está no estado \`${server.status}\`. Use \`/plan\` ou \`/build\` para iniciar uma nova sessão.`);
-    return;
-  }
-
   try {
-    server.reconnectSSE();
-    await interaction.editReply('🔄 Reconexão SSE iniciada. Se a tarefa ainda estava em andamento, a conexão será restaurada automaticamente.');
+    // Busca o canal/thread existente
+    const thread = await interaction.client.channels.fetch(channelId);
+
+    // Cria nova sessão com os mesmos dados
+    const newSession = await sessionManager.create({
+      projectPath: interrupted.projectPath,
+      threadId: channelId,
+      userId: interrupted.userId,
+      agent: interrupted.agent,
+      model: interrupted.model ?? '',
+    });
+
+    await newSession.loadGitInfo();
+
+    // Remove o registro antigo apenas após criação bem-sucedida (evita perda de dados)
+    await removeSession(interrupted.sessionId);
+
+    // Conecta o StreamHandler ao thread existente
+    const streamHandler = new StreamHandler(thread, newSession);
+    streamHandler.start();
+
+    await interaction.editReply(
+      `🔄 **Sessão restaurada!** Projeto: \`${path.basename(interrupted.projectPath)}\`, agente: \`${interrupted.agent}\`.`
+    );
   } catch (err) {
-    await interaction.editReply(`❌ Erro ao reconectar: ${err.message}`);
+    console.error('[Reconnect] Erro ao restaurar sessão:', err);
+    // Re-persiste o registro interrompido para que o usuário possa tentar novamente
+    await saveSession(interrupted).catch((e) =>
+      console.error('[Reconnect] Erro ao re-persistir sessão interrompida após falha:', e)
+    );
+    await interaction.editReply('❌ Falha ao restaurar a sessão. Tente `/reconnect` novamente ou use `/plan` / `/build` para iniciar uma nova.');
   }
 }
 

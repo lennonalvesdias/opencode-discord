@@ -127,6 +127,13 @@ vi.mock('../src/git.js', () => ({
   pushBranch: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../src/persistence.js', () => ({
+  loadSessions: vi.fn().mockResolvedValue([]),
+  removeSession: vi.fn().mockResolvedValue(undefined),
+  saveSession: vi.fn().mockResolvedValue(undefined),
+  clearSessions: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('../src/plannotator-client.js', () => ({
   PlannotatorClient: vi.fn().mockImplementation(function () {
     this.approve = vi.fn().mockResolvedValue({});
@@ -1504,15 +1511,15 @@ function createServerManager(serverResult = null) {
 }
 
 describe('handleCommand() — /reconnect', () => {
-  it('/reconnect — sem sessão na thread → editReply com "Nenhuma sessão"', async () => {
+  it('/reconnect — sem sessão na thread → reply ephemeral com "Nenhuma sessão"', async () => {
     const interaction = createInteraction({ commandName: 'reconnect', channelId: 'thread-abc' });
     const sm = createSessionManager({ getByThreadResult: null });
     const svr = createServerManager(null);
 
     await handleCommand(interaction, sm, svr);
 
-    expect(interaction.editReply).toHaveBeenCalledWith(
-      expect.stringContaining('Nenhuma sessão'),
+    expect(interaction.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('Nenhuma sessão') }),
     );
   });
 

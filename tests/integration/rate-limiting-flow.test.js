@@ -40,6 +40,7 @@ vi.mock('../../src/config.js', () => ({
   GIT_AUTHOR_NAME: 'Test Bot',
   GIT_AUTHOR_EMAIL: 'bot@test.com',
   MAX_GLOBAL_SESSIONS: 0,
+  PERSISTENCE_PATH: null,
   validateProjectPath: vi.fn((name) => ({
     valid: true,
     projectPath: '/projetos/' + name,

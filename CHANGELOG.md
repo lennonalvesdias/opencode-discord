@@ -6,6 +6,16 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.
 
 ---
 
+## [1.9.0] — 2026-03-30
+
+### ✨ Adicionado
+- Comando `/reconnect` agora restaura sessões interrompidas por reinício do bot (RF-10): cria nova sessão OpenCode na mesma thread Discord com os mesmos parâmetros (projeto, agente, modelo).
+- Sessões interrompidas por reinício são preservadas em disco com `status: 'interrupted'` em vez de serem deletadas.
+- Campo `model` agora é persistido no `data.json` para permitir restauração fiel da sessão.
+- Mensagem de reinício atualizada para orientar o usuário a usar `/reconnect`.
+
+---
+
 ## [1.8.5] — 2026-03-30
 
 ### 🔧 Changed

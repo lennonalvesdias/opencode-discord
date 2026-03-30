@@ -20,7 +20,7 @@ import { handleCommand, handleInteraction, handleAutocomplete, commandDefinition
 import { formatAge, debug } from './utils.js';
 import { ALLOWED_USERS, ALLOW_SHARED_SESSIONS, CHANNEL_FETCH_TIMEOUT_MS, SHUTDOWN_TIMEOUT_MS, VOICE_MAX_DURATION_SECS, VOICE_SHOW_TRANSCRIPT, VOICE_CDN_DOWNLOAD_TIMEOUT_MS } from './config.js';
 import { startHealthServer } from './health.js';
-import { loadSessions, removeSession } from './persistence.js';
+import { loadSessions, removeSession, saveSession } from './persistence.js';
 import { initAudit, audit } from './audit.js';
 import { initLogger, logError, logWarn } from './logger.js';
 import { loadModels } from './model-loader.js';
@@ -103,16 +103,16 @@ client.once('clientReady', async (c) => {
           ]).catch(() => null);
           if (channel && channel.isThread()) {
             await channel.send(
-              `⚠️ **O bot foi reiniciado** e a sessão \`${s.sessionId}\` (projeto \`${path.basename(s.projectPath)}\`) foi encerrada.\n` +
-              `Use \`/plan\` ou \`/build\` para iniciar uma nova sessão.`
+              `⚠️ **O bot foi reiniciado** e a sessão \`${s.sessionId}\` (projeto \`${path.basename(s.projectPath)}\`) foi interrompida.\n` +
+              `Use \`/reconnect\` para retomar a sessão, ou \`/plan\` / \`/build\` para iniciar uma nova.`
             );
           }
         } catch (err) {
           console.error(`[Index] Erro ao notificar thread ${s.threadId}:`, err);
         }
-        // Remover sessão interrompida da persistência (após notificar)
-        await removeSession(s.sessionId).catch(err =>
-          console.error(`[Index] Erro ao remover sessão ${s.sessionId} da persistência:`, err)
+        // Marcar sessão como interrompida (para permitir reconexão via /reconnect)
+        await saveSession({ ...s, status: 'interrupted' }).catch(err =>
+          console.error(`[Index] Erro ao marcar sessão ${s.sessionId} como interrompida:`, err)
         );
       }
     }

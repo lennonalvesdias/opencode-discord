@@ -747,6 +747,7 @@ class SessionManager {
       projectPath: session.projectPath,
       userId: session.userId,
       agent: session.agent,
+      model: session.model,
       status: 'active',
       createdAt: new Date().toISOString(),
     }).catch(err => console.error('[SessionManager] Erro ao persistir sessão:', err));
